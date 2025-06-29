@@ -1,0 +1,1292 @@
+---
+title: "2.1_BaselineModel"
+author: "LSH"
+date: "2025-03-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+# Libraries
+library(here)
+library(readxl)
+library(tidyverse)
+library(fastDummies)
+library(sf)
+library(giscoR)
+library(doParallel)
+library(ranger)
+library(tidymodels)
+library(CAST)
+library(ggplot2)
+library(pdp)
+library(ggExtra)
+library(patchwork)
+library(boot)
+library(ggsn)
+library(foreach)
+library(tictoc)
+
+theme_set(theme_bw(base_size = 20))
+library(ghibli)
+library("rcartocolor")
+library("paletteer")
+```
+
+# AOA function
+Specific function to run the AOA (area of applicability)
+```{r}
+source("https://raw.githubusercontent.com/FlorianSchne/reciprocalModelling/refs/tags/v1.0/functions.R")
+```
+
+
+# Load data
+```{r}
+df.rawdata <- read_csv(here("Derived/Data/20240830_SurveyData_geodata_LSH.csv" 
+                            ))
+
+df.rawdata
+
+range(df.rawdata$OC)
+range(df.rawdata$BD)
+range(df.rawdata$RockFragment, na.rm=TRUE)
+
+table(df.rawdata$LU, df.rawdata$Survey)
+```
+
+# Select relevant data for the baseline model
+```{r}
+df.filtereddata <- df.rawdata %>%
+  # remove organic soils and those with high Rock fragment content
+  filter(
+    # remove organic sites, defined as OC > 10
+    OC <= 10, # all sites have already been removed when gathering the data, but just to make sure
+    # remove sites with too many rocks
+    RockFragment < 5# removed 850 sites
+    )%>%
+  # remove columns that are not necessary for running baseline model
+  select(-c(SiteNo, #Survey, 
+            Year, Top_hz, Bottom_hz, NutsYear, NUTS2, NUTS2_name
+            ))%>%
+  drop_na()%>% # remove 5 rows with missing data; 3 CMON sites wihtout texture from map, two DDJD sites without EUSR
+  arrange(ID)
+
+df.filtereddata
+
+# table(df.filtereddata$LU, df.filtereddata$Survey)
+# table(df.filtereddata$Survey)
+# table(df.filtereddata$LU)
+```
+
+```{r}
+table(df.filtereddata$LU, df.filtereddata$Survey)
+```
+
+
+## check for missing data
+```{r}
+df.filtereddata[!complete.cases(df.filtereddata), ]
+```
+
+
+```{r}
+df.lostdata1 <- df.rawdata %>%
+  # remove organic soils and those with high Rock fragment content
+  filter(
+    # remove organic sites, defined as OC > 10
+    OC <= 10, # all sites have already been removed when gathering the data, but just to make sure
+    # remove sites with too many rocks
+    RockFragment < 5# removed 850 sites
+    )%>%
+  # remove columns that are not necessary for running baseline model
+  select(-c(SiteNo, #Survey, 
+            Year, Top_hz, Bottom_hz, NutsYear, NUTS2, NUTS2_name
+            ))%>%
+  # remove CMON data due to missing texture data
+  #filter(Survey != "CMON")%>%
+  #drop_na()%>% # remove 5 rows with missing data; 3 CMON sites wihtout texture from map, two DDJD sites without EUSR
+  arrange(ID)
+
+df.lostdata1[!complete.cases(df.lostdata1), ]
+
+#table(test$LU, test$Survey)
+```
+
+## Export dataset for baseline model to make figures and some simple analyses
+```{r}
+# write.csv(df.filtereddata,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_allCountries_BaselineModelData_LSH.csv"), row.names=FALSE) # DATE_datadescription_INITIALS
+```
+
+
+## Make numerical id
+The numerical ID is used to split the baseline data up when running the leave-1-survey-out crossvalidation
+```{r}
+# Make universal ID that is numerical
+id.list <- list(
+  id = c(
+  1:2121, # 2121 BZE sites
+  2200:2354, # 155 CMON sites
+  3000:3141, # 142 DDJD sites
+  4000:4041, # 42 ISIS sites
+  5000:5610 # 611 RMQS sites
+  )
+)
+
+length(id.list$id)
+length(df.filtereddata$ID)
+
+### Assign to df.filtereddata 
+df.filtereddata_id <- df.filtereddata%>%
+  arrange(Survey, ID)%>%
+  mutate(
+    id = id.list$id
+  )%>%
+  relocate(id)
+
+df.filtereddata_id
+```
+
+## Set up training and testing data
+```{r}
+train1 <- df.filtereddata_id %>%
+  # select grassland sites 
+  filter(LU == "grassland")%>%
+  # remove cols that interfere with model
+  select(-c(LU,
+            TN, # due to strong correlation with OC, and human-influenced due to fertilization
+            Sand, # due to correlation with clay and silt
+            flatness, # due to correlation with slope
+            MeanDailyHighWarmest, MeanDailyLowColdest, # due to including only one temperature parameter as well as correlation with MAT
+            PrecipWettest, PrecipDriest, # due to including only one precipitation parameter as well as correlation with MAP 
+            #Histosols, # because of high correlation with OC despite mineral soil filter
+            EUSR.ID, # Because other EUSR parameter is included
+            EUSRegion, # Because other EUSR parameter is included
+            )) 
+
+test1 <- df.filtereddata_id %>%
+  # remove cols that interfere with model
+  select(-c(
+            TN, # due to strong correlation with OC, and human-influenced due to fertilization
+            Sand, # due to correlation with clay and silt
+            flatness, # due to correlation with slope
+            MeanDailyHighWarmest, MeanDailyLowColdest, # due to including only one temperature parameter as well as correlation with MAT
+            PrecipWettest, PrecipDriest, # due to including only one precipitation parameter as well as correlation with MAP 
+            #Histosols, # because of high correlation with OC despite mineral soil filter
+            EUSR.ID, # Because other EUSR parameter is included
+            EUSRegion, # Because other EUSR parameter is included
+            ))
+
+train1
+```
+
+# Baseline model
+
+## Load in tuned model
+```{r}
+baselineModel <- readRDS(here("r1_reference-model/dat/out/grass-model.rds"))
+```
+
+
+## Variable importance for baseline model
+```{r fig.asp = 0.8, fig.width = 8}
+ImpData_baseline <- as.data.frame(importance(baselineModel))
+#row.names(ImpData)
+
+ImpData_baseline$Var.Names <- row.names(ImpData_baseline)
+
+# fix colnames
+colnames(ImpData_baseline)[1] <- "Importance"
+
+ggplot(ImpData_baseline, 
+       aes(x=reorder(Var.Names, Importance), y=Importance))+
+  #geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=Importance), color="skyblue")+
+  #geom_point(aes(size = Importance), color="blue", alpha=0.6)+
+  geom_bar(stat = "identity", fill="skyblue")+
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+ggplot(ImpData_baseline %>%arrange(desc(Importance)) %>% head(10), # selects the top 10 variables
+       aes(x=reorder(Var.Names, Importance), 
+             y=Importance))+
+  geom_bar(stat = "identity", fill="skyblue")+
+  theme_light(base_size=20) +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+```{r}
+ImpData_baseline%>%arrange(desc(Importance))
+```
+
+## Export variable importance
+For plotting the figure for the manuscript
+```{r}
+# write.csv(ImpData_baseline,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_baselinemodel_VarImp_LSH.csv"), row.names=FALSE)
+```
+
+
+## Partial dependence plots for the baseline model
+For the manuscript
+```{r}
+# univariate pdps; top four variables
+df.pdp_oc <- pdp::partial(baselineModel, pred.var = c("OC"),
+                          train = train1)
+
+df.pdp_cn <- pdp::partial(baselineModel, pred.var = c("CN"),
+                          train = train1)
+
+df.pdp_map <- pdp::partial(baselineModel, pred.var = c("MAP"),
+                          train = train1)
+
+df.pdp_clay <- pdp::partial(baselineModel, pred.var = c("Clay"),
+                          train = train1)
+```
+
+```{r}
+# two-dimensional pdp; clay and silt as they are the top two variables by variable importance other than OC; they can make a nice triangular figure
+
+###### This takes a little while, so only run if needed  ########
+
+# pdp_texture=pdp::partial(baselineModel,
+#                          pred.var = c("Clay", "Silt"),
+#                          chull=T,
+#                          parallel=F,
+#                          # plot=T,
+#                          # ice=T,
+#                          quantiles=F,
+#                          trim.outliers=T,
+#                           train = train1)
+```
+
+
+### Export partial dependence information
+```{r}
+# write.csv(df.pdp_oc,file=here::here("Derived",
+#                                 "Data",
+#                                 "20250307_baselinemodel_pdp_oc_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.pdp_cn,file=here::here("Derived",
+#                                 "Data",
+#                                 "20250307_baselinemodel_pdp_cn_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.pdp_map,file=here::here("Derived",
+#                                 "Data",
+#                                 "20250307_baselinemodel_pdp_map_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.pdp_clay,file=here::here("Derived",
+#                                 "Data",
+#                                 "20250307_baselinemodel_pdp_clay_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(pdp_texture,file=here::here("Derived",
+#                                 "Data",
+#                                 "20250307_baselinemodel_2sidedpdp_texture_LSH.csv"), row.names=FALSE)
+```
+
+
+# Crossvalidation
+## Libraries
+```{r}
+cores = detectCores() - 1
+if(cores == 0) {cores = 1}
+```
+
+## 5-fold random cross-validation
+```{r}
+indices = caret::createFolds(1:nrow(train1),
+                              k=5)
+
+length(indices[[1]])
+length(indices[[2]])
+length(indices[[3]])
+length(indices[[4]])
+length(indices[[5]])
+```
+
+```{r}
+# Compare R2(oob) with R2(5-fold random CV)
+
+# run
+set.seed(123)
+
+if (.Platform$OS.type == "unix") {
+  library(doMC)
+  registerDoMC(cores)
+} else {
+  cl = makePSOCKcluster(cores)
+  registerDoParallel(cl)
+}
+
+tic()
+cv_5fold = foreach(i=1:length(indices),
+             .combine = 'rbind',
+             .packages=c("ranger","dplyr")) %dopar% {
+
+               cal=train1[-indices[[i]],]
+               val=train1[ indices[[i]],]
+
+               model=ranger(
+                            BD ~  . -ID - id - Survey,
+                            data=cal,
+                            num.trees=1000,
+                            mtry=floor(sqrt((ncol(cal) - 3))))
+
+               val %>%
+                 select(BD) %>%
+                 mutate(fold=i,
+                        pred=predict(model,
+                                     data=val)$predictions)
+
+             }
+
+try(registerDoSEQ(),silent=T)
+try(stopCluster(cl),silent=T)
+toc()
+
+cv_5fold %>%
+  summarise(RMSE=sqrt(mean((pred - BD)^2)),
+            R2=1 - sum((pred - BD)^2) / sum((BD - mean(BD))^2),
+            bias=mean(BD)- mean(pred))
+
+```
+
+```{r}
+# summarise with rounded values
+cv_5fold %>%
+  summarise(
+    RMSE = round(sqrt(mean((pred - BD)^2)), 2),
+    R2 = round(1 - sum((pred - BD)^2) / sum((BD - mean(BD))^2), 2),
+    bias = round(mean(BD)- mean(pred), 4)
+    )
+```
+
+### Export data from 5fold random cv for plotting
+```{r}
+# write.csv(cv_5fold,file=here::here("Derived",
+#                                 "Data",
+#                                 "20240930_baselinemodel_5foldrandomCV_LSH.csv"), row.names=FALSE)
+```
+
+
+
+## Leave1-survey-out cross-validation
+```{r}
+# make list of rownumbers in train1 (grasslands) for each survey
+df.index <- train1%>%
+  mutate(index = rownames(train1))
+
+#df.index
+
+df.indexde <- df.index%>%filter(Survey=="BZE")
+BZE.indices <- as.double(c(df.indexde$index))
+
+df.indexdk <- df.index%>%filter(Survey=="DDJD")
+DDJD.indices <- as.double(c(df.indexdk$index))
+
+df.indexie <- df.index%>%filter(Survey=="I-SIS")
+ISIS.indices <- as.double(c(df.indexie$index))
+
+df.indexfr <- df.index%>%filter(Survey=="RMQS")
+RMQS.indices <- as.double(c(df.indexfr$index))
+
+df.indexbe <- df.index%>%filter(Survey=="CMON")
+CMON.indices <- as.double(c(df.indexbe$index))
+
+
+
+# combine lists
+index.survey <- list(BZE.indices, DDJD.indices, ISIS.indices, RMQS.indices, CMON.indices
+                     )
+names(index.survey) <- c("BZE", "DDJD", "I-SIS", "RMQS", "CMON"
+                         )
+
+#index.survey
+```
+
+```{r}
+# Compare R2(oob) with R2(5-fold random CV)
+
+# run
+set.seed(123)
+
+if (.Platform$OS.type == "unix") {
+  library(doMC)
+  registerDoMC(cores)
+} else {
+  cl = makePSOCKcluster(cores)
+  registerDoParallel(cl)
+}
+
+tic()
+cv_l1o = foreach(i=1:length(index.survey),
+             .combine = 'rbind',
+             .packages=c("ranger","dplyr")) %dopar% {
+
+               cal=train1[-index.survey[[i]],]
+               val=train1[ index.survey[[i]],]
+
+               model=ranger(
+                            BD ~  . -ID -Survey -id,
+                            data=cal,
+                            num.trees=1000,
+                            mtry=floor(sqrt((ncol(cal) - 3))))
+
+               val %>%
+                 select(BD) %>%
+                 mutate(fold=i,
+                        pred=predict(model,
+                                     data=val)$predictions)
+
+             }
+
+try(registerDoSEQ(),silent=T)
+try(stopCluster(cl),silent=T)
+toc()
+```
+
+```{r}
+# across all surveys
+cv_l1o %>%
+  summarise(
+    RMSE = round(sqrt(mean((pred - BD)^2)), 2),
+    R2 = round(1 - sum((pred - BD)^2) / sum((BD - mean(BD))^2), 2),
+    bias = round(mean(BD)- mean(pred), 3)
+    )
+```
+
+
+## assign to fold (survey)
+```{r}
+CrossValSurvey <- cv_l1o %>%
+  group_by(fold)%>%
+  mutate(
+    n = length(BD), 
+    SurveyLeftOut = case_when(
+     n == length(BZE.indices) ~ "BZE",
+     n == length(DDJD.indices) ~ "DDJD",
+     n == length(RMQS.indices) ~ "RMQS",
+     n == length(ISIS.indices) ~ "ISIS", 
+     n == length(CMON.indices) ~ "CMON", 
+     T          ~ "somethingiswrong"
+    )
+  )%>%
+  group_by(SurveyLeftOut)%>%
+  summarise(
+    GrasslandSites = mean(n),
+    RMSE=sqrt(mean((pred - BD)^2)),
+            R2=1 - sum((pred - BD)^2) / sum((BD - mean(BD))^2),
+            bias=mean(BD)- mean(pred))
+
+
+CrossValSurvey%>%
+  mutate( 
+    RMSE = round(RMSE, 3), 
+    R2 = round(R2, 3), 
+    bias = round(bias, 3)
+    )
+```
+
+# AOA
+Run the AOA function to find annual cropland sites that differ too much from the training set (grasslands) and are therefore not comparable enough. 
+```{r}
+dat_aoa <- test1 %>% 
+  # Select variables used for model training
+  select(
+         names(train1),
+         -BD, -Survey, -ID, -id) %>%
+  
+  # Dummy code character / factor variables
+  # Creates multiple columns per variable with values of 1 or 0
+  mutate(across(where(is.character), 
+                function(x) fct_lump_prop(as.factor(x), .05))) %>% 
+  drop_na() %>% 
+  fastDummies::dummy_cols(remove_selected_columns = T) %>%
+  as_tibble(.name_repair = "universal") %>%  
+  
+  # Restrict to testing data + add splitting variable
+  cbind(test1 %>% 
+              select(ID, Survey,
+                     LU)) %>% 
+  distinct()%>%
+  relocate(ID, LU)
+
+dat_aoa
+tail(dat_aoa)
+```
+
+## weights
+originate from the variable importance of the baseline model
+```{r}
+weight <- tibble(name = names(dat_aoa)) %>% 
+  left_join(enframe(baselineModel$variable.importance)) %>% 
+  filter(!is.na(value)) %>% 
+  
+  # For dummy coded variable, assign VI value of grouping variable for all
+  bind_rows(tibble(name = names(dat_aoa)) %>% 
+              left_join(enframe(baselineModel$variable.importance)) %>% 
+              filter(is.na(value)) %>% 
+              mutate(name1 = sub("_[^_]*$", "", name)) %>% 
+              select(-value) %>% 
+              left_join(enframe(baselineModel$variable.importance), 
+                        by = c("name1" = "name"))) %>% 
+  filter(!(name %in% c("id", "ID", "Survey", "LU")))
+
+weight
+```
+
+
+## Run AOA
+Run only on annual cropland sites
+```{r}
+aoa <- dat_aoa %>% 
+  filter(LU == "annual crops") %>% 
+  select(ID, Survey) %>% 
+  bind_cols(aoa1(newdata = dat_aoa %>% filter(LU == "annual crops"),
+                 train = dat_aoa %>% filter(LU == "grassland"),
+                 weight = weight,
+                 variables = weight$name))
+aoa
+```
+
+## Overview of sites included/excluded
+1 means a site is included, 0 means it is excluded
+```{r}
+aoa %>%
+  group_by(AOA) %>%
+  tally() %>%
+  mutate(
+    rel = round(100*n / nrow(aoa),1)
+         )
+```
+
+## Overview by surveys
+```{r}
+aoa %>%
+  group_by(Survey)%>%
+  mutate(
+    N = length(ID)
+  )%>%
+  group_by(AOA, Survey) %>%
+  #tally() %>%
+  summarise(
+    N = N,
+    n = length(ID),
+    #N = sum(n), 
+    rel = round(100*n/N, 1)
+    #rel = round(100*n / nrow(aoa),1)
+         )%>%
+  distinct()
+```
+
+## Plot the sites that pass and dont pass AOA by variable 
+To determine where they differ most from each other
+```{r}
+vars <- df.filtereddata %>%
+    filter(LU == "annual crops") %>% 
+    select_if(is.numeric) %>% 
+    
+    # Get mean, min, and max for each variable
+    summarize(across(everything(), list(mean = mean, min = min, max = max), na.rm = TRUE)) %>%
+    pivot_longer(cols = everything(), names_to = "name", values_to = "value")%>%
+    separate(name, into = c("name", "stat"))%>% 
+
+    # Create column for full name of each variable and its unit
+    mutate(label = case_when(
+                        name == "Clay" ~ "Clay content (%)",
+                        name == "Silt" ~ "Silt content (%)",
+                        name == "RockFragment" ~ "Rock fragment content (%)",
+                        name == "OC" ~ "Organic C content (%)",
+                        name == "CN" ~ "C:N ratio"
+                        ),
+           label = coalesce(label, name), 
+           value = round(value, 2)
+           )
+
+vars
+```
+
+```{r}
+imp <- enframe(baselineModel$variable.importance) %>%
+    arrange(-value)
+
+imp <- merge(imp, vars, by=c("name"), all=FALSE)
+
+imp
+```
+
+```{r}
+df.plot <- aoa %>%
+  left_join(test1 %>%
+              select(ID,
+                     one_of(names(train1))))%>%
+  select_at(vars("ID", "AOA", imp$name)) %>% 
+  mutate(AOA = ifelse(AOA == 1, "In", "Excluded"),
+         AOA = fct_relevel(AOA,
+                         "In", "Excluded")
+         )%>%
+    gather(key, value, Albeluvisols:wettness)
+
+df.plot
+#unique(df.plot$key)
+```
+
+### Select specific variables for plotting
+There are too many variables to be in one plot
+```{r fig.asp = 0.5, fig.width = 15} 
+# observed variables and climatic variables
+df.plot_obs <- subset(df.plot, key == "Clay" | key == "CN" | key == "pH" | key == "Silt" | key == "OC" | key == "RockFragment" | key == "MAP" | key == "MAT" 
+                      | key == "wettness"  | key == "flatness"  | key == "slope" | key == "elevation")
+
+ggplot(df.plot_obs, 
+       aes(x=value, fill=AOA))+
+  geom_density(alpha=0.5)+ 
+  facet_wrap("key",
+             nrow = 2,
+             scales = "free",
+             strip.position = "bottom",
+             #labeller = labeller(key = labels)
+             )+
+  ggthemes::theme_tufte(base_family = "",
+                        base_size = 20)+ 
+  #scale_y_discrete(expand = c(0.1, 0.1)) + 
+  theme(legend.position = "bottom",
+        axis.ticks = element_line(colour = "black", linewidth = .2),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        strip.placement = "outside",
+        text = element_text(size=15))+ 
+  scale_fill_manual(values = 
+    c(colorspace::diverge_hcl(6, "Green-Brown", rev = T)[5], "grey90"))
+
+## Main difference in OC content; excluded sites have higher OC than included sites. Excluded sites also have slightly higher clay content and lower elevation as well as lower pH. OC, elevation and pH may be related to boggy areas? 
+```
+
+```{r fig.asp = 0.5, fig.width = 15} 
+# geological information from map source
+df.plot_geo <- subset(df.plot, #key == "AgeNewest" | 
+key == "claystone" | key == "clay" | key == "gravel" | key == "lignite" | key == "limestone" | key == "marl" 
+                      | key == "marlstone" | key == "mudstone" | key == "siltstone" | key == "sandstone" | key == "conglomerate"  | key == "gneiss"
+                      | key == "silt" | key == "phyllite" | key == "undifferentiated")
+
+ggplot(df.plot_geo, 
+       aes(x=value, fill=AOA))+
+  geom_density(alpha=0.5)+ 
+  facet_wrap("key",
+             nrow = 2,
+             scales = "free",
+             strip.position = "bottom",
+             #labeller = labeller(key = labels)
+             )+
+  ggthemes::theme_tufte(base_family = "",
+                        base_size = 20)+ 
+  #scale_y_discrete(expand = c(0.1, 0.1)) + 
+  theme(legend.position = "bottom",
+        axis.ticks = element_line(colour = "black", linewidth = .2),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        strip.placement = "outside",
+        text = element_text(size=15))+ 
+  scale_fill_manual(values = 
+    c(colorspace::diverge_hcl(6, "Green-Brown", rev = T)[5], "grey90"))
+
+## In general, these plots are difficult to interpret, since the variables are probability of a given site having that specific geological parameter. In general, the excluded sites have higher values for all variables, but this mgiht be an artifact from the much lower number of sites affecting the visual look of the distribution while it is comparable to a similar subsample of the included sites. 
+```
+
+```{r fig.asp = 0.5, fig.width = 15} 
+# WRB classes; also porbability
+df.plot_wrb <- subset(df.plot, key == "Albeluvisols" | key == "Alisols" | key == "Arenosols" | key == "Calcisols" | key == "Cambisols" | key == "Chernozems" 
+                      | key == "Fluvisols" | key == "Gleysols" | key == "Histosols" | key == "Leptosols" | key == "Luvisols"  
+                      | key == "Phaeozems" | key == "Planosols" | key == "Podzols" | key == "Regosols" | key == "Stagnosols"
+                      | key == "Umbrisols" | key == "Vertisols")
+
+ggplot(df.plot_wrb, 
+       aes(x=value, fill=AOA))+
+  geom_density(alpha=0.5)+ 
+  facet_wrap("key",
+             nrow = 2,
+             scales = "free",
+             strip.position = "bottom",
+             #labeller = labeller(key = labels)
+             )+
+  ggthemes::theme_tufte(base_family = "",
+                        base_size = 20)+ 
+  #scale_y_discrete(expand = c(0.1, 0.1)) + 
+  theme(legend.position = "bottom",
+        axis.ticks = element_line(colour = "black", linewidth = .2),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        strip.placement = "outside",
+        text = element_text(size=15))+ 
+  scale_fill_manual(values = 
+    c(colorspace::diverge_hcl(6, "Green-Brown", rev = T)[5], "grey90"))
+
+
+## slightly higher likelihood of fluvisol, chernozem and phaeozem soils, likely correlating with OC content. 
+```
+
+
+# Apply the baselinemodel to croplands
+(all sites, actually)
+```{r}
+pred <- test1  %>% 
+    mutate(pred = predict(baselineModel,
+                        test1)$predictions
+            ) %>% 
+    select(ID, Survey, LU, Clay, Silt, BD, pred, #effect
+           ) %>% 
+    left_join(aoa)%>%
+  mutate(
+    # calculate difference in BD 
+    BD_diff = BD - pred,
+    BD_rel = (BD/pred -1)*100,
+    AOApass = case_when(
+      AOA == 1 ~ "In", 
+      AOA == 0 ~ "Excluded", 
+      T ~ "Grassland"
+    ), 
+    AOApass = factor(AOApass, levels = c("In", "Excluded", "Grassland"))
+  )
+
+
+pred
+```
+
+```{r fig.asp = 0.5, fig.width = 10}
+ggplot(pred, 
+       aes(x=BD_diff, y= Survey, fill=Survey))+
+  ggridges::geom_density_ridges(quantile_lines = T, 
+                                quantiles = 2,
+                                alpha = 0.7,
+                                size = .15)+
+  #theme_minimal(base_size = 20)+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    theme(legend.position = "none")+
+  paletteer::scale_fill_paletteer_d("fishualize::Etheostoma_spectabile")+
+  xlab("Anthropogenic increase in subsoil bulk density")+
+  ylab("")+ 
+  facet_wrap("AOApass",
+             nrow = 1,
+             scales = "free",
+             strip.position = "top",
+             #labeller = labeller(key = labels)
+             )
+
+ggplot(pred, 
+       aes(x=pred, y= Survey, fill=Survey))+
+  ggridges::geom_density_ridges(quantile_lines = T, 
+                                quantiles = 2,
+                                alpha = 0.7,
+                                size = .15)+
+  #theme_minimal(base_size = 20)+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    theme(legend.position = "none")+
+  paletteer::scale_fill_paletteer_d("fishualize::Etheostoma_spectabile")+
+  xlab("Predicted subsoil bulk density")+
+  ylab("")+ 
+  facet_wrap("AOApass",
+             nrow = 1,
+             scales = "free",
+             strip.position = "top",
+             #labeller = labeller(key = labels)
+             )
+```
+
+### Get mean and median predicted increases in subsoil compaction
+For all observations
+```{r}
+pred %>%
+  filter(LU == "annual crops" & AOA == 1)%>%
+  summarise(
+    n = length(ID),
+    meanBD_obs = mean(BD), 
+    meanBD_pred = mean(pred), 
+    meanBD_diff = mean(BD_diff), 
+    sdBD_diff = sd(BD_diff)
+  )
+```
+
+By Survey
+```{r}
+pred %>%
+  group_by(Survey)%>%
+  filter(LU == "annual crops" & AOA == 1)%>%
+  summarise(
+    n = length(ID),
+    meanObs = round(mean(BD), 2), 
+    meanPred = round(mean(pred), 2),
+    meanBD_diff = round(mean(BD_diff), 2),
+    sdDiff = round(sd(BD_diff), 2)
+  )
+```
+
+## Export results
+```{r}
+# prepare data; get additional information from the input data
+df.export_all <- merge(df.filtereddata, 
+                       pred%>%
+                     select(-c(LU, Clay, Silt, BD, Survey 
+                               )), 
+                            by=c("ID"), all=T)#%>%
+
+df.export_all
+```
+```{r}
+# write.csv(df.export_all, file=here::here("Derived",
+#                                 "Data",
+#                                "20250307_SubsoilCompaction_allCountries_LSH.csv"), row.names=FALSE)
+```
+
+
+# Post-hoc model
+Use a random forest model to explain the predicted subsoil compaction
+```{r}
+df.explain <- pred%>%select(ID, AOA, LU, BD_diff)%>%
+  # remove sites that do not pass AOA
+  filter(AOA == 1)%>%
+  # get additional information from original dataset
+  merge(df.filtereddata %>% select(-c(LU)), 
+        by=c("ID"))
+
+table(df.explain$LU)
+table(df.explain$AOA)
+
+df.explain
+```
+
+## Include data from EUROSTAT
+```{r}
+df.eurostat <- read_csv(here("Input/EUROSTAT.csv"))%>%
+  # rename col
+  rename(
+    NUTS2 = NewNUTS2
+  )
+
+df.eurostat
+```
+
+```{r}
+df.explain_eurostat <- df.explain %>%
+  # select only relevant
+  select(ID, AOA, LU, BD_diff, Survey, Clay, Silt, OC, CN, pH, MAP, MAT, elevation)%>%
+  # get nuts regions
+  left_join(df.rawdata %>% select(ID, SiteNo, NUTS2),
+            by=c("ID"))%>%
+  # add eurostat data without tillage info
+  left_join(df.eurostat,
+            by=c("NUTS2"))
+
+df.explain_eurostat
+```
+
+## export for plotting
+```{r}
+# write.csv(df.explain_eurostat,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthocModelData_LSH.csv"), row.names=FALSE)
+```
+
+
+## Run posthoc model
+```{r}
+set.seed(123)
+
+posthocModel  <- ranger(BD_diff ~ Clay + Silt # texture is a large factor in soil structure
+                       + OC # related to both soil structure and ability to expand/rebound after compaction
+                       + pH # may correlate with certain soil textures as well as liming practices
+                       + MAP + MAT # climate, particularly water dynamics
+                       + MeanFarmSize # farme farms may have heavier machines, however very large farms may not have time/resources to frequently use machines on all fields
+                       + MeanConventionalTillage_prop # frequent ploughing may result in higher subsoil compaction
+                      + PS_prop # potatoes and sugar beets are heavy crops when harvested, and the machines will be very heavy during harvest
+                  ,
+              data = df.explain_eurostat,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.explain_eurostat) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel
+```
+
+### 5fold cross validation
+```{r}
+# Compare R2(oob) with R2(5-fold random CV)
+
+# run
+set.seed(123)
+
+if (.Platform$OS.type == "unix") {
+  library(doMC)
+  registerDoMC(cores)
+} else {
+  cl = makePSOCKcluster(cores)
+  registerDoParallel(cl)
+}
+
+tic()
+cv_5fold_post = foreach(i=1:length(indices),
+             .combine = 'rbind',
+             .packages=c("ranger","dplyr")) %dopar% {
+
+               cal=df.explain_eurostat[-indices[[i]],]
+               val=df.explain_eurostat[ indices[[i]],]
+
+               model=ranger(
+                            BD_diff ~ Clay + Silt # texture is a large factor in soil structure
+                       + OC # related to both soil structure and ability to expand/rebound after compaction
+                       + pH # may correlate with certain soil textures as well as liming practices
+                       + MAP + MAT # climate, particularly water dynamics
+                       + MeanFarmSize # farme farms may have heavier machines, however very large farms may not have time/resources to frequently use machines on all fields
+                       + MeanConventionalTillage_prop # frequent ploughing may result in higher subsoil compaction
+                      + PS_prop,
+                            data=cal,
+                            num.trees=1000,
+                            mtry=floor(sqrt((ncol(cal) - 3))))
+
+               val %>%
+                 select(BD_diff) %>%
+                 mutate(fold=i,
+                        pred=predict(model,
+                                     data=val)$predictions)
+
+             }
+
+try(registerDoSEQ(),silent=T)
+try(stopCluster(cl),silent=T)
+toc()
+
+cv_5fold_post %>%
+  summarise(RMSE=sqrt(mean((pred - BD_diff)^2)),
+            R2=1 - sum((pred - BD_diff)^2) / sum((BD_diff - mean(BD_diff))^2),
+            bias=mean(BD_diff)- mean(pred))
+
+```
+
+```{r}
+# summarise with rounded values
+cv_5fold_post %>%
+  summarise(
+    RMSE = round(sqrt(mean((pred - BD_diff)^2)), 2),
+    R2 = round(1 - sum((pred - BD_diff)^2) / sum((BD_diff - mean(BD_diff))^2), 2),
+    bias = round(mean(BD_diff)- mean(pred), 4)
+    )
+```
+
+
+
+
+# Variable importance
+
+```{r}
+posthocModel.vars <- enframe(posthocModel$variable.importance)
+
+ggplot(posthocModel.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")
+
+```
+
+## Export model info 
+```{r}
+# write.csv(posthocModel.vars,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthocModel_LSH.csv"), row.names=FALSE)
+```
+
+
+## pdp
+```{r}
+# two variables
+## runs slowly, so only run if needed
+# posthocpdp_texture <- pdp::partial(posthocModel,
+#                          pred.var = c("Clay", "Silt"),
+#                          chull=T,
+#                          parallel=F,
+#                          # plot=T,
+#                          # ice=T,
+#                          quantiles=F,
+#                          trim.outliers=T)
+```
+
+```{r}
+# write.csv(posthocpdp_texture,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_2sidedpdp_texture_LSH.csv"), row.names=FALSE)
+```
+
+```{r}
+# univariate
+df.posthocpdp_oc <- pdp::partial(posthocModel, pred.var = c("OC"))
+
+df.posthocpdp_silt <- pdp::partial(posthocModel, pred.var = c("Silt"))
+
+df.posthocpdp_map <- pdp::partial(posthocModel, pred.var = c("MAP"))
+
+df.posthocpdp_clay <- pdp::partial(posthocModel, pred.var = c("Clay"))
+
+df.posthocpdp_MFS <- pdp::partial(posthocModel, pred.var = c("MeanFarmSize"))
+
+df.posthocpdp_MAT <- pdp::partial(posthocModel, pred.var = c("MAT"))
+
+df.posthocpdp_ph <- pdp::partial(posthocModel, pred.var = c("pH"))
+
+df.posthocpdp_till <- pdp::partial(posthocModel, pred.var = c("MeanConventionalTillage_prop"))
+
+df.posthocpdp_ps <- pdp::partial(posthocModel, pred.var = c("PS_prop"))
+```
+
+### Export
+```{r}
+# write.csv(df.posthocpdp_oc,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_oc_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_silt,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_silt_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_map,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_map_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_clay,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_clay_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_MFS,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_mfs_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_MAT,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_mat_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_ph,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_ph_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_till,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_till_LSH.csv"), row.names=FALSE)
+# 
+# write.csv(df.posthocpdp_ps,file=here::here("Derived",
+#                                "Data",
+#                                 "20250307_posthoc_pdp_ps_LSH.csv"), row.names=FALSE)
+```
+
+
+## Run posthoc model for each survey
+See how they perform individually and how the variable ranks differ
+```{r}
+df.expl_bze <- df.explain_eurostat %>%
+  filter(Survey == "BZE")
+
+set.seed(123)
+
+posthocModel_bze  <- ranger(BD_diff ~ Clay + Silt
+                       + OC
+                       + pH 
+                       + MAP + MAT 
+                       + MeanFarmSize
+                       + MeanConventionalTillage_prop
+                      + PS_prop
+                  ,
+              data = df.expl_bze,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.expl_bze) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel_bze
+
+posthocModel_bze.vars <- enframe(posthocModel_bze$variable.importance)
+
+ggplot(posthocModel_bze.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")+
+  ggtitle("BZE")
+```
+
+```{r}
+df.expl_cmon <- df.explain_eurostat %>%
+  filter(Survey == "CMON")
+
+set.seed(123)
+
+posthocModel_cmon  <- ranger(BD_diff ~ Clay + Silt
+                       + OC
+                       + pH 
+                       + MAP + MAT 
+                       + MeanFarmSize
+                       + MeanConventionalTillage_prop
+                      + PS_prop
+                  ,
+              data = df.expl_cmon,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.expl_cmon) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel_cmon
+
+posthocModel_cmon.vars <- enframe(posthocModel_cmon$variable.importance)
+
+ggplot(posthocModel_cmon.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")+
+  ggtitle("CMON")
+```
+
+```{r}
+df.expl_ddjd <- df.explain_eurostat %>%
+  filter(Survey == "DDJD")
+
+set.seed(123)
+
+posthocModel_ddjd  <- ranger(BD_diff ~ Clay + Silt
+                       + OC
+                       + pH 
+                       + MAP + MAT 
+                       + MeanFarmSize
+                       + MeanConventionalTillage_prop
+                      + PS_prop
+                  ,
+              data = df.expl_ddjd,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.expl_ddjd) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel_ddjd
+
+posthocModel_ddjd.vars <- enframe(posthocModel_ddjd$variable.importance)
+
+ggplot(posthocModel_ddjd.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")+
+  ggtitle("DDJD")
+```
+
+```{r}
+####### Only two annual cropland sites, so this will not work #####
+df.expl_isis <- df.explain_eurostat %>%
+  filter(Survey == "I-SIS")
+
+set.seed(123)
+
+posthocModel_isis <- ranger(BD_diff ~ Clay + Silt
+                       + OC
+                       + pH 
+                       + MAP + MAT 
+                       + MeanFarmSize
+                       + MeanConventionalTillage_prop
+                      + PS_prop
+                  ,
+              data = df.expl_isis,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.expl_isis) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel_isis
+
+posthocModel_isis.vars <- enframe(posthocModel_isis$variable.importance)
+
+ggplot(posthocModel_isis.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")+
+  ggtitle("ISIS")
+```
+
+```{r}
+df.expl_rmqs <- df.explain_eurostat %>%
+  filter(Survey == "RMQS")
+
+set.seed(123)
+
+posthocModel_rmqs <- ranger(BD_diff ~ Clay + Silt
+                       + OC
+                       + pH 
+                       + MAP + MAT 
+                       + MeanFarmSize
+                       + MeanConventionalTillage_prop
+                      + PS_prop
+                  ,
+              data = df.expl_rmqs,
+              num.trees = 1000,
+              mtry = floor(sqrt(ncol(df.expl_rmqs) - 1))
+              ,
+              importance = "permutation")
+
+posthocModel_rmqs
+
+posthocModel_rmqs.vars <- enframe(posthocModel_rmqs$variable.importance)
+
+ggplot(posthocModel_rmqs.vars, aes(x = value, y = reorder(name, value), fill = value)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  ylab("Variable") +
+  xlab("Permutation Importance") +
+  theme_minimal(base_size=20) +
+  theme(legend.position = "none") +
+  scale_fill_gradient(low = "#fa8e57", high = "#5765fa")+
+  ggtitle("RMQS")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

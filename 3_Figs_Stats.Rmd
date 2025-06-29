@@ -1,0 +1,2847 @@
+---
+title: "3_Figs_Stats"
+author: "LSH"
+date: "2025-03-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(here)
+library(sf)
+library(tidyverse)
+library(readxl)
+library(paletteer)
+library(stringr)
+library(giscoR)
+library(ggpubr)
+library(ggpmisc)
+
+
+# Eurostat data
+library(eurodata)
+
+theme_set(theme_classic(base_size = 20)) 
+```
+
+# Establish Colors for figures
+```{r}
+# LU colors
+LU_hex <- c("#ffb633", "#56755d")
+
+# Gradients for BD change
+BDcomp_hex <- c(
+          "#9c3e5d", # > 0.3
+          "#cb627b", # 0.2 - 0.3
+          "#e6959f", # 0.1 - 0.2
+          "#ffc5c7", # 0 - 0.1
+          "#d2eeea", # -0.1 - 0 
+          "#99cfd1", # -0.2 - -0.1
+          "#67a9b6", # -0.3 - -0.2
+          "#3b809a"#, # < -0.3
+          #"#2a5676"
+          )
+```
+
+
+
+# Background maps and coordinates
+## Merge with data
+```{r}
+df.baselineinput <- read_csv(here("Derived/Data/20250307_allCountries_BaselineModelData_LSH.csv"))
+
+table(df.baselineinput$LU, df.baselineinput$Survey)
+
+df.baselineinput
+```
+
+
+# Set up background map
+One map with only country outlines (NUTS0), and one with regional outlines; NUTS2 for all countries except DK, which uses NUTS1 (the specific locations of DK sites is unknown, and DK is a small country as well, so it is maybe easier to use the whole country) --- consider this for IE as well, since there are not so many observations in IE?
+
+## Make NUTS-based outline
+For aggregation maps
+```{r}
+flanders <- gisco_get_nuts(nuts_level=1)%>%
+  rename(
+    nutsID = NUTS_ID
+  )%>%
+  filter(nutsID  == "BE2")
+
+flanders
+```
+
+```{r}
+# nuts2
+EUoutline2 <- gisco_get_nuts(nuts_level=2)%>%
+  rename(
+    nutsID = NUTS_ID
+  )%>%
+  filter(
+    CNTR_CODE == "BE" |
+           CNTR_CODE == "FR" | CNTR_CODE == "DE" | CNTR_CODE == "IE" | CNTR_CODE == "DK")%>%
+  #st_join(flanders)%>%
+  # add survey names
+  mutate(
+    Survey = case_when(
+      CNTR_CODE == "DK" ~ "DDJD",
+      CNTR_CODE == "BE" ~ "CMON",
+      CNTR_CODE == "IE" ~ "I-SIS",
+      CNTR_CODE == "DE" ~ "BZE-LW",
+      CNTR_CODE == "FR" ~ "RMQS",
+      T ~ NA
+    )
+  )%>%
+  # remove non-Flanders belgian nuts2 regions
+  filter(nutsID != "BE10" & nutsID != "BE31" & nutsID != "BE32" & nutsID != "BE33" & nutsID != "BE34" & nutsID != "BE35")
+
+#EUoutline2
+
+# nuts1
+EUoutline1 <- gisco_get_nuts(nuts_level=1)%>%
+  rename(
+    nutsID = NUTS_ID
+  )%>%
+  filter(CNTR_CODE == "DK")
+
+#EUoutline1
+```
+
+
+## Country-based outline
+For plotting individual sites on top of later
+```{r}
+# nuts1
+CountryOutline <- gisco_get_nuts(nuts_level=0)%>%
+  rename(
+    nutsID = NUTS_ID
+  )%>%
+  rbind(flanders)%>%
+  mutate(
+    # Make binary indicator of inclusion or exclusion of the study
+    X = ifelse(#CNTR_CODE == "BE" | 
+      CNTR_CODE == "DK" | CNTR_CODE == "DE" | CNTR_CODE == "FR" | CNTR_CODE == "IE" | nutsID  == "BE2", 1, 0), 
+    X = factor(X)
+  )
+
+CountryOutline
+flanders
+```
+
+```{r fig.asp = 0.9, fig.width = 8}
+basemap <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    #aes(fill = X)
+    fill = "grey90", col="grey60"
+    )+
+  theme_minimal(base_size=20)+
+  # scale_fill_manual(values=c("white",  "grey90"))+ # colors the coutnries based on whether or not they are included in the study
+  # guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # # PLOTTING DATA
+  # geom_sf(data=, 
+  #      aes())+
+  
+  # Plot limits, labels etc ## must be last
+  coord_sf(
+    crs = 3035, 
+    xlim = c(3017294, 4653440),
+    ylim = c(2053597, 3828510)
+    )#+
+  #ggtitle("Country outline basemap")
+
+basemap
+```
+
+
+# Figure 1: LU map
+All sites that are included in the model
+## conver coordinates to sf
+```{r}
+df.LUpoints <- df.baselineinput %>% 
+  drop_na(lon)%>%
+    sf::st_as_sf(coords = c("lon", 
+                    "lat"),
+        crs = 4326)
+#df.LUpoints
+```
+
+
+```{r fig.asp = 0.9, fig.width = 8}
+plot.lu <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=20)+
+  scale_fill_manual(values=c("grey90",  "white"))+ # colors the coutnries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  geom_sf(data=df.LUpoints%>%
+            mutate(
+              LU2 = ifelse(LU == "grassland", "Grassland", "Annual cropland"), 
+              X = ifelse(Survey == "I-SIS" & LU == "annual crops", 0, 1)
+            )%>%
+            filter(X == 1), 
+       aes(col=LU2))+
+  #paletteer::scale_color_paletteer_d("nbapalettes::jazz", direction =-1)+
+  scale_color_manual(values=c(LU_hex))+
+    theme(legend.position = "bottom")+
+  
+  # Plot limits, labels etc ## must be last
+  coord_sf(
+    crs = 3035, 
+    xlim = c(3017294, 4653440),
+    ylim = c(2053597, 3828510)
+    )+
+  guides(col=guide_legend(title="Land Use"))+
+  guides(colour = guide_legend(override.aes = list(size=4), title="Land Use"))+
+  theme(legend.text=element_text(size=20), 
+        legend.title=element_text(size=22))
+
+plot.lu
+```
+
+## Add DK as a grid
+As the coordinates from DK and Flanders are not available, the DK data is added as a grid (waffle plot) over the map. 
+```{r}
+################# CURRENTLY DOES NOT WORK DUE TO PACKAGE NOT BEING IN R 4.4.0 #############################
+library(ggparliament)
+
+lu_house <- df.baselineinput%>%
+            mutate(
+              LU2 = ifelse(LU == "grassland", "Grassland", "Annual cropland")
+            )%>%
+         filter(Survey == "DDJD")%>%
+         group_by(LU2)%>%
+  summarise(
+    seats = length(ID),
+    colour = case_when(
+      LU2 == "Grassland" ~ "#56755d",
+      LU2 == "Annual cropland" ~ "#ffb633"
+    )
+  )%>%
+  distinct()
+
+#lu_house
+
+lu_house2 <- parliament_data(election_data = lu_house,
+                             #type = "semicircle",
+                             type = "classroom",
+                             parl_rows = 11,
+                             party_seats = lu_house$seats)
+
+#lu_house2
+
+plot.lu.dk <- ggplot(lu_house2, aes(x, y, colour = LU2)) +
+  geom_parliament_seats(size=2.5) +
+  #highlight the party in control of the House with a black line
+  #geom_highlight_government(government == 1) +
+  #draw majority threshold
+  #draw_majoritythreshold(n = 218, label = TRUE, type = 'semicircle')+
+  #set theme_ggparliament
+  theme_ggparliament() +
+  #other aesthetics
+  #labs(colour = NULL,
+   #    title = "United States House of Representatives",
+    #   subtitle = "Party that controls the House highlighted.") +
+  scale_colour_manual(values = lu_house2$colour,
+                      limits = lu_house2$LU2)+
+    theme(legend.position = "none")
+
+plot.lu.dk
+```
+
+```{r fig.asp = 0.5, fig.width = 15}
+fig1.0 <- plot.lu + annotation_custom(ggplotGrob(plot.lu.dk),
+                          xmin = 4187294, xmax = 4473440,
+                          ymin = 3543597, ymax = 3808510)
+
+fig1.0
+```
+
+```{r}
+################# ggplarliament is not available since R 4.4.0 #############################
+library(ggparliament)
+
+lu_house_cmon <- df.baselineinput%>%
+            mutate(
+              LU2 = ifelse(LU == "grassland", "Grassland", "Annual cropland")
+            )%>%
+         filter(Survey == "CMON")%>%
+         group_by(LU2)%>%
+  summarise(
+    seats = length(ID),
+    colour = case_when(
+      LU2 == "Grassland" ~ "#56755d",
+      LU2 == "Annual cropland" ~ "#ffb633"
+    )
+  )%>%
+  distinct()
+
+#lu_house_cmon
+
+lu_house_cmon2 <- parliament_data(election_data = lu_house_cmon,
+                             #type = "semicircle",
+                             type = "classroom",
+                             parl_rows = 18,
+                             party_seats = lu_house_cmon$seats)
+
+#lu_house_cmon2
+
+plot.lu.cmon <- ggplot(lu_house_cmon2, aes(x, y, colour = LU2)) +
+  geom_parliament_seats(size=2.5) +
+  #highlight the party in control of the House with a black line
+  #geom_highlight_government(government == 1) +
+  #draw majority threshold
+  #draw_majoritythreshold(n = 218, label = TRUE, type = 'semicircle')+
+  #set theme_ggparliament
+  theme_ggparliament() +
+  #other aesthetics
+  #labs(colour = NULL,
+   #    title = "United States House of Representatives",
+    #   subtitle = "Party that controls the House highlighted.") +
+  scale_colour_manual(values = lu_house_cmon2$colour,
+                      limits = lu_house_cmon2$LU2)+
+    theme(legend.position = "none")
+
+plot.lu.cmon
+```
+```{r fig.asp = 0.5, fig.width = 15}
+fig1 <- fig1.0 + annotation_custom(ggplotGrob(plot.lu.cmon),
+                          # xmin = 3693440, xmax = 4039586,
+                          # ymin = 3143597, ymax = 3408510
+                          xmin = 3803440, xmax = 4039586,
+                          ymin = 3103597, ymax = 3608510
+                          )
+
+fig1
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_F1_LUmap2_bluepink5.png", plot=fig1, width=12, height=12, dpi=400)
+```
+
+
+# How many sites included in the study?
+```{r}
+df.sites <- df.baselineinput
+
+table(df.sites$LU)
+
+713 + 2358
+```
+
+```{r}
+table(df.sites$Survey, df.sites$LU)
+```
+
+### proportion of danish sites (old sites)
+The Danish data is older than the rest of the data 
+```{r}
+round(100*((123 + 19)/(1559 + 3737)), 1)
+100 - round(100*((123 + 19)/(1559 + 3737)), 1)
+```
+
+# Baseline model Fig. 2
+Plot the variable importance and partial dependence plots for top 4 variables
+```{r}
+df.baseline_varImp0 <- read_csv(here("Derived/Data/20250307_baselinemodel_VarImp_LSH.csv")) 
+
+df.baseline_varImp <- df.baseline_varImp0%>%
+  # fix names
+  mutate(
+    Var.Names = case_when(
+      Var.Names == "OC" ~ "Organic C", 
+      Var.Names == "elevation" ~ "Elevation",
+      Var.Names == "AgeNewest" ~ "Geological Age",
+      Var.Names == "CN" ~ "C/N ratio",
+      T ~ Var.Names
+    )
+  )
+
+df.baseline_varImp %>% arrange(desc(Importance))
+```
+
+```{r fig.asp = 0.8, fig.width = 8}
+ImpData <- df.baseline_varImp%>% arrange(desc(Importance))%>% head(10)
+
+fig2a <- ggplot(ImpData%>%filter(Importance > 5e-04), 
+       aes(y=reorder(Var.Names, Importance), x=Importance))+
+  geom_bar(stat = "identity", fill="#67a9b6")+
+  theme_light(base_size=15) +
+  #coord_flip() +
+  theme(
+    legend.position="none",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(), 
+  )+
+  labs(
+    x = "Variable Importance", 
+    #y = ""
+  )+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(angle=0,# vjust=-3,
+                                 hjust=1
+                                 )
+  )+
+  scale_x_continuous(limits = c(0,0.031), expand = c(0, 0))
+
+fig2a
+```
+
+## PDPs
+Shade out the upper and lowe 5% of the range
+```{r}
+# get data
+df.pdp_oc <- read_csv(here("Derived/Data/20250307_baselinemodel_pdp_oc_LSH.csv"))
+
+df.pdp_cn <- read_csv(here("Derived/Data/20250307_baselinemodel_pdp_cn_LSH.csv"))
+
+df.pdp_clay <- read_csv(here("Derived/Data/20250307_baselinemodel_pdp_clay_LSH.csv"))
+
+df.pdp_map <- read_csv(here("Derived/Data/20250307_baselinemodel_pdp_map_LSH.csv"))
+```
+
+
+```{r}
+library(ggExtra)
+Bound.low <- quantile(df.baselineinput$OC, 0.95)
+Bound.high <- quantile(df.baselineinput$OC, 0.05)
+
+
+fig2b <- ggplot(df.pdp_oc,
+       aes(x=OC, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_line(size=1.2, col="#67a9b6"# col="#cb627b"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Organic C (%)", 
+    y = expression("Predicted BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = OC, y = mean(BD)), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          axis.title.y = element_text(size=10))+
+  scale_y_continuous(limits = c(1.05, 1.65), breaks =c(1.1, 1.3, 1.5))+
+  annotate("rect", xmin = Bound.low, xmax = 10, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")
+
+fig2b <- ggMarginal(fig2b, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig2b
+```
+
+```{r}
+Bound.low <- quantile(df.baselineinput$Clay, 0.95)
+Bound.high <- quantile(df.baselineinput$Clay, 0.05)
+
+fig2c <- ggplot(df.pdp_clay,
+       aes(x=Clay, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_line(size=1.2, col="#67a9b6"# col="#cb627b"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Clay (%)", 
+    y = expression("Predicted BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = Clay, y = mean(BD)), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12),
+          axis.title.y = element_text(size=10),  
+          # axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(1.05, 1.65), breaks =c(1.1, 1.3, 1.5))+
+  annotate("rect", xmin = Bound.low, xmax = 93, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")
+
+fig2c <- ggMarginal(fig2c, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig2c
+```
+
+```{r}
+Bound.low <- quantile(df.baselineinput$CN, 0.95)
+Bound.high <- quantile(df.baselineinput$CN, 0.05)
+
+
+fig2d <- ggplot(df.pdp_cn,
+       aes(x=CN, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_line(size=1.2, col="#67a9b6"# col="#cb627b"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "C/N ratio (-)", 
+    y = expression("Predicted BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput %>% filter(CN < 42) # remove outliers that dont exist in the modelling data
+             , aes(x = CN, y = mean(BD)), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          # axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank())+
+  scale_y_continuous(limits = c(1.05, 1.65), breaks =c(1.1, 1.3, 1.5))+
+  annotate("rect", xmin = Bound.low, xmax = 42, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")
+
+fig2d <- ggMarginal(fig2d, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig2d
+```
+
+```{r}
+Bound.low <- quantile(df.baselineinput$MAP, 0.95)
+Bound.high <- quantile(df.baselineinput$MAP, 0.05)
+
+
+fig2e <- ggplot(df.pdp_map,
+       aes(x=MAP, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_line(size=1.2, col="#67a9b6"# col="#cb627b"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "MAP (mm)", 
+    y = expression("Predicted Bulk density" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = MAP, y = mean(BD)), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          axis.title.y = element_blank())+
+  scale_y_continuous(limits = c(1.05, 1.65), breaks =c(1.1, 1.3, 1.5))+
+  annotate("rect", xmin = Bound.low, xmax = 2200, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = min(df.baselineinput$MAP), xmax =Bound.high, ymin = 1.05, ymax = 1.65, alpha = .2, fill = "grey")
+
+fig2e <- ggMarginal(fig2e, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig2e
+```
+
+## Combine pdp figs
+```{r}
+fig2_pdp <- ggarrange(fig2b, fig2d, fig2c, fig2e, 
+                  ncol=2, nrow=2, #common.legend = TRUE, legend="bottom", 
+          labels = c("B", "C", "D", "E"),
+          widths = c(1.05, 1),
+          #font.label = list(size = 25 , color = "black"), 
+          label.x = -0.05
+         )
+
+fig2_pdp
+```
+
+## Combine to big figure
+```{r fig.asp = 0.4, fig.width = 10}
+fig2 <- ggarrange(
+  fig2a, fig2_pdp, 
+  widths = c(1., 1.2), 
+  labels = c("A", "")
+)
+
+fig2
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250310_F2_baselinemodel.png", plot=fig2, width=10, height=4, dpi=400)
+```
+
+
+# Supplementary figure S1: Correlation between top baseline variables
+```{r}
+# make list of relevant variables; before the names were changed
+var.list <- df.baseline_varImp0%>%filter(Importance > 3e-04)%>% arrange(desc(Importance))
+var.list <- c(var.list$Var.Names)
+var.list
+
+df.s1 <- df.baselineinput %>%
+  select(c(var.list))#
+
+#df.s1
+```
+
+```{r fig.asp = 1, fig.width = 10}
+library(psych)
+library(corrplot)
+
+# make colors
+div_hex <- colorRampPalette(c(BDcomp_hex[1:4], "white", BDcomp_hex[5:8]))
+div_gradient <- div_hex(100)
+
+
+df.corr <- corr.test(df.s1, adjust = "none", method="spearman") # from psych package
+corr <- df.corr$r
+p.mat<- df.corr$p
+
+# scale plot 
+options(repr.plot.width=15, repr.plot.height=15)
+
+fig.s1 <- {
+  corrplot(corr, # update numbers
+addgrid.col = "white",
+method = "color", # instead of "circle"
+col = rev(div_gradient), #my.col,
+bg = "white",
+tl.col = "black",
+tl.pos = "td",
+type = "upper",
+tl.srt = 45,
+tl.cex = 1.,
+#font = 1, # controls font type (eg times new roman)
+#text.cex=4,
+cl.cex = 1., # legend size
+#title= "influences on biomass production",
+diag = FALSE,
+p.mat= p.mat, # update numbers
+# insig = "blank"),
+insig = "label_sig",
+sig.level = c(.001, .01, .05), pch.cex = 1.3, pch.col = "grey20")
+  recordPlot()
+}
+
+corrplot(corr, # update numbers
+addgrid.col = "white",
+method = "color", # instead of "circle"
+col = rev(div_gradient), #my.col,
+bg = "white",
+tl.col = "black",
+tl.pos = "td",
+type = "upper",
+tl.srt = 45,
+tl.cex = 1.25,
+#font = 1, # controls font type (eg times new roman)
+#text.cex=4,
+cl.cex = 2., # legend size
+#title= "influences on biomass production",
+diag = FALSE,
+addCoef.col = "grey30", # pastes spearman vals
+   number.cex=1.5, # number size
+#p.mat= p.mat#, # update numbers
+#insig = "blank")
+#insig = "label_sig",
+#sig.level = c(.001, .01, .05), pch.cex = 1.3, pch.col = "grey20"
+)
+```
+
+## Export figure
+corrplot is tricky to export!
+```{r}
+########### ONLY RUN TO SAVE PLOT #################
+
+# Initialize file path
+# file_path= "Derived/Figures/20240710_F.S1_baselinemodel_correlations.png"
+# png(height=400, width=400, file=file_path, type = "cairo")
+# 
+# # Your function to plot image goes here
+# corrplot(corr, # update numbers
+# addgrid.col = "white",
+# method = "color", # instead of "circle"
+# col = rev(div_gradient), #my.col,
+# bg = "white",
+# tl.col = "black",
+# tl.pos = "td",
+# type = "upper",
+# tl.srt = 45,
+# tl.cex = 1.,
+# #font = 1, # controls font type (eg times new roman)
+# #text.cex=4,
+# cl.cex = 1., # legend size
+# #title= "influences on biomass production",
+# diag = FALSE,
+# p.mat= p.mat, # update numbers
+# #insig = "blank")
+# insig = "label_sig",
+# sig.level = c(.001, .01, .05), pch.cex = 1.3, pch.col = "grey20")
+#   recordPlot()
+# 
+# # Then
+# dev.off()
+```
+
+
+# Fig. 3: Baseline model performance
+```{r}
+# 5-fold random CV
+#df.5fold <- read_csv(here("Derived/Data/20240930_baselinemodel_5foldrandomCV_LSH.csv"))
+
+df.crossval <- read_excel("r1_reference-model/dat/out/validation.xlsx")%>%
+  rename(
+    fold = outer_fold
+  )
+
+df.crossval
+```
+
+```{r}
+x_mean <- mean(df.crossval$BD)
+y_mean <- mean(df.crossval$BD_pred)
+
+fig3a <- ggplot(df.crossval, 
+       aes(x = BD, y = BD_pred, shape=factor(fold)
+           )
+       )+
+  geom_point(col="#56755d", alpha=0.4)+
+  geom_abline(intercept=0, slope=1, linetype="longdash")+
+  stat_poly_line(col="#455e4a", se=F, alpha=0.2) +
+  stat_poly_eq(use_label(c("eq")))+
+  # geom_smooth(method="lm",
+  #             #aes(group=1),
+  #             se=F, col="#56755d", linetype="solid", alpha=0.1)+
+  scale_shape_manual(values=c(16, 17, 18, 15, 4, 15, 1, 2, 3, 8, 5))+
+  theme_classic(base_size = 15)+
+  labs(
+    x = expression("Observed Grassland BD" ~ "(g cm" ^ {-3} * ")"), 
+    y = expression("Est. Grassland BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  theme(legend.position = "right")+
+  labs(shape='Random fold')+
+  guides(shape = guide_legend(override.aes = list(size = 3, alpha = 1)))+
+  coord_cartesian(ylim = c(0.85, 2.1), 
+                  xlim = c(0.85, 2.1)
+                  )+
+  ggtitle("A")+
+  theme(plot.title = element_text(hjust = -0.05, face="bold"),)+
+  annotate("text", x=1.55, y=2,label="Overestimation", size=6, col="grey30")+
+  annotate("text", x=1.85, y=1,label="Underestimation", size=6, col="grey30")+
+  # geom_point(x=x_mean, y= y_mean, shape = 4, size= 7, col="black", stroke = 3)+
+  # geom_point(x=x_mean, y= y_mean, shape = 4, size= 7, col="orange", stroke = 1.5)+
+  geom_point(x=x_mean, y= y_mean, shape = 4, size= 5, col="grey20", stroke = 3)
+
+fig3a
+```
+
+```{r}
+df.pred <- read_csv(here("Derived/Data/20250307_SubsoilCompaction_allCountries_LSH.csv"))%>%
+  # assign classes of degree of compaction
+            mutate(
+                   BD_diff_class = case_when(
+                                    BD_diff <  -0.3 ~ "Less than -0.3",
+                                    BD_diff < -0.2 ~ "-0.3 to -0.2",
+                                    BD_diff < -0.1 ~ "-0.2 to -0.1",
+                                    BD_diff < (0) ~ "-0.1 to 0",
+                                    BD_diff <  0.1 ~ "0 to 0.1",
+                                    BD_diff < 0.2 ~ "0.1 to 0.2",
+                                    BD_diff < 0.3 ~ "0.2 to 0.3",
+                                    T          ~"More than 0.3"),
+                   BD_diff_class = fct_relevel(BD_diff_class,
+                                         "Less than -0.3",
+                                     "-0.3 to -0.2",
+                                    "-0.2 to -0.1",
+                                    "-0.1 to 0",
+                                      "0 to 0.1",
+                                      "0.1 to 0.2",
+                                      "0.2 to 0.3",
+                                      "More than 0.3"))%>%
+  left_join(df.coords, 
+        by=c("ID"))
+
+table(df.pred$AOA, df.pred$Survey)
+
+df.pred
+```
+
+```{r}
+ggplot(df.pred%>%
+         filter(LU == "annual crops"), 
+       aes(x=OC, y=BD_diff))+
+  geom_point()
+
+ggplot(df.pred%>%
+         filter(LU == "annual crops"), 
+       aes(x=log10(OC), y=BD_diff))+
+  geom_point()
+```
+
+
+
+
+```{r}
+# get annual croplands within AOA
+df.pred_AC <- df.pred %>% filter(LU == "annual crops")
+
+x_mean2 <- mean(df.pred_AC$BD)
+y_mean2 <- mean(df.pred_AC$pred)
+
+x_mean2
+y_mean2
+
+# make cropland fig
+fig3b <- ggplot(df.pred_AC%>%
+                  # exclude ireland
+                  filter(Survey != "I-SIS"), 
+       aes(x = BD, y = pred
+           )
+       )+
+  geom_point(col="#ffb633", alpha=0.2)+
+  geom_abline(intercept=0, slope=1, linetype="longdash")+
+  stat_poly_line(col="orange3", se=F) +
+  stat_poly_eq(use_label(c("eq")))+
+  # geom_smooth(method="lm",
+  #             aes(group=1),
+  #             se=F, col="orange3", linetype="solid")+
+  #stat_poly_line() +
+  # stat_poly_eq(aes(group=1), 
+  #              # use_label(c(#"eq", 
+  #              #   "R2"
+  #              #             ))
+  #              )+
+  scale_shape_manual(values=c(16, 17, 18, 15, 4))+
+  theme_classic(base_size = 15)+
+  labs(
+    x = expression("Observed Cropland BD" ~ "(g cm" ^ {-3} * ")"), 
+    y = expression("Est. reference Cropland BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  theme(legend.position = "bottom")+
+  labs(shape='Random fold number')+
+  guides(shape = guide_legend(override.aes = list(size = 3)))+
+  coord_cartesian(ylim = c(0.85, 2.1), 
+                  xlim = c(0.85, 2.1)
+                  )+
+  ggtitle("B")+
+  theme(plot.title = element_text(hjust = -0.05, face="bold"),)+
+  annotate("text", x=1.55, y=2,label="Overestimation", size=6, col="grey30")+
+  annotate("text", x=1.85, y=1,label="Underestimation", size=6, col="grey30")+
+  # geom_point(x=x_mean2, y= y_mean2, shape = 4, size=5, col="grey30", stroke = 1.5)+
+  geom_point(x=x_mean2, y= y_mean2, shape = 4, size= 5, col="grey30", stroke = 3)
+
+fig3b
+```
+
+```{r fig.asp = 0.4, fig.width = 15}
+fig3 <- ggarrange(fig3a, fig3b, 
+                  ncol=2, nrow=1, common.legend = FALSE, #legend="left", 
+          #labels = c("A", "B"),
+          widths = c(1.305, 1),
+          #heights = c(1, 1),
+          font.label = list(size = 22, color = "black")#, 
+          #label.x = 0.05
+         )
+
+fig3
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250613_F3_CV_results.png", plot=fig3, width=15, height=6, dpi=400)
+```
+
+```{r}
+length(df.pred_AC$ID)
+length(df.crossval$fold)
+```
+
+### check distribution of countries for grasslands
+```{r}
+df.pred_PG <- df.pred %>% filter(LU != "annual crops")
+
+ggplot(df.pred_PG%>%
+                  # exclude ireland
+                  filter(Survey != "I-SIS"), 
+       aes(x = BD, y = pred, col= Survey
+           )
+       )+
+  geom_point(#col="lightblue", 
+    alpha=0.2)+
+  geom_abline(intercept=0, slope=1, linetype="longdash")+
+  stat_poly_line(col="orange3", se=F) +
+  stat_poly_eq(use_label(c("eq")))+
+  scale_shape_manual(values=c(16, 17, 18, 15, 4))+
+  theme_classic(base_size = 15)+
+  labs(
+    x = expression("Observed Grassland BD" ~ "(g cm" ^ {-3} * ")"), 
+    y = expression("Est. reference Grassland BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  theme(legend.position = "bottom")+
+  labs(shape='Random fold number')+
+  guides(shape = guide_legend(override.aes = list(size = 3)))+
+  coord_cartesian(ylim = c(0.85, 2.1), 
+                  xlim = c(0.85, 2.1)
+                  )+
+  ggtitle("B")+
+  theme(plot.title = element_text(hjust = -0.25, face="bold"),)+
+  annotate("text", x=1.55, y=2,label="Overestimation", size=6, col="grey30")+
+  annotate("text", x=1.85, y=1,label="Underestimation", size=6, col="grey30")+
+  geom_point(x=x_mean2, y= y_mean2, shape = 4, size= 5, col="grey30", stroke = 3)
+```
+
+
+
+# Figure 4: Predicted change in BD
+
+## Point map
+### convert coordinates to sf
+```{r}
+df.Predpoints <- df.pred %>% 
+  drop_na(lon)%>%
+    sf::st_as_sf(coords = c("lon", 
+                    "lat"),
+        crs = 4326)
+
+#df.Predpoints
+
+table(df.pred$LU)
+
+table(df.Predpoints$AOA)
+```
+
+```{r fig.asp = 0.9, fig.width = 10}
+fig4a <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=10)+
+  scale_fill_manual(values=c("grey90",  "white"#"grey95"
+                             ))+ # colors the countries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  ## Plot countries individually to control point sizes
+  # France
+  geom_sf(data=df.Predpoints%>%
+            filter(AOA == 1, Survey == "RMQS"), 
+       aes(col=BD_diff_class),size=1.1)+
+  # Germany
+  geom_sf(data=df.Predpoints%>%
+            filter(AOA == 1, Survey == "BZE"), 
+       aes(col=BD_diff_class), size=0.5)+
+  
+  # Failed AOA
+  geom_sf(data=df.Predpoints%>%
+            filter(AOA == 0), 
+       aes(col=BD_diff_class), size=1.2, shape=4, col="grey20")+
+  
+  
+  scale_color_manual(values=c(rev(BDcomp_hex)), 
+                     expression(Delta * " Bulk density" ~ "(g cm" ^ {-3} * ")"))+
+    theme(legend.position = "bottom")+
+  
+  # Plot limits, labels etc ## must be last
+  coord_sf(
+    crs = 3035, 
+    xlim = c(3017294, 4653440),
+    ylim = c(2053597, 3828510)
+    )+
+  ggtitle("A")+ 
+    theme(plot.title = element_text(size = 20, face = "bold"))+
+  theme(legend.text=element_text(size=12),
+        legend.title=element_text(size=17))+
+  guides(colour = guide_legend(
+         override.aes = list(size=5),
+         title.position="top",
+         title.hjust = 0.5
+         ))
+
+fig4a
+```
+
+
+```{r}
+################# ggplarliament is not available since R 4.4.0 #############################
+# library(ggparliament)
+
+pred_house <- df.pred%>%
+            filter(AOA == 1, 
+              Survey == "DDJD")%>%
+         group_by(BD_diff_class)%>%
+  summarise(
+    seats = length(ID),
+    colour = case_when(
+      BD_diff_class == "Less than -0.3" ~ "#3b809a",
+      BD_diff_class == "-0.3 to -0.2" ~ "#67a9b6",
+      BD_diff_class == "-0.2 to -0.1" ~ "#99cfd1",
+      BD_diff_class == "-0.1 to 0" ~ "#d2eeea",
+      BD_diff_class == "0 to 0.1" ~ "#ffc5c7",
+      BD_diff_class == "0.1 to 0.2" ~ "#e6959f",
+      BD_diff_class == "0.2 to 0.3" ~ "#cb627b",
+      BD_diff_class == "More than 0.3" ~ "#9c3e5d"
+    )
+  )%>%
+  distinct()
+
+pred_house
+
+pred_house2 <- parliament_data(election_data = pred_house,
+                             #type = "semicircle",
+                             type = "classroom",
+                             parl_rows = 12,
+                             party_seats = pred_house$seats)
+
+pred_house2
+
+plot.pred.dk <- ggplot(pred_house2, aes(x, y, colour = BD_diff_class)) +
+  geom_parliament_seats(size=1.5) +
+  #set theme_ggparliament
+  theme_ggparliament() +
+  scale_colour_manual(values = pred_house2$colour,
+                      limits = pred_house2$BD_diff_class)+
+    theme(legend.position = "none")
+
+plot.pred.dk
+```
+
+```{r fig.asp = 0.9, fig.width = 10}
+fig4afull.0 <- fig4a + annotation_custom(ggplotGrob(plot.pred.dk),
+                          xmin = 4207294, xmax = 4493440,
+                          ymin = 3523597, ymax = 3808510)
+
+fig4afull.0
+```
+
+```{r}
+################# ggplarliament is not available since R 4.4.0 #############################
+library(ggparliament)
+
+pred_house_cmon <- df.pred%>%
+            filter(AOA == 1, 
+              Survey == "CMON")%>%
+         group_by(BD_diff_class)%>%
+  summarise(
+    seats = length(ID),
+    colour = case_when(
+      BD_diff_class == "Less than -0.3" ~ "#3b809a",
+      BD_diff_class == "-0.3 to -0.2" ~ "#67a9b6",
+      BD_diff_class == "-0.2 to -0.1" ~ "#99cfd1",
+      BD_diff_class == "-0.1 to 0" ~ "#d2eeea",
+      BD_diff_class == "0 to 0.1" ~ "#ffc5c7",
+      BD_diff_class == "0.1 to 0.2" ~ "#e6959f",
+      BD_diff_class == "0.2 to 0.3" ~ "#cb627b",
+      BD_diff_class == "More than 0.3" ~ "#9c3e5d"
+    )
+  )%>%
+  distinct()
+
+pred_house_cmon
+
+pred_house_cmon2 <- parliament_data(election_data = pred_house_cmon,
+                             #type = "semicircle",
+                             type = "classroom",
+                             parl_rows = 16,
+                             party_seats = pred_house_cmon$seats)
+
+pred_house_cmon2
+
+plot.pred.cmon <- ggplot(pred_house_cmon2, aes(x, y, colour = BD_diff_class)) +
+  geom_parliament_seats(size=1.7) +
+  #set theme_ggparliament
+  theme_ggparliament() +
+  scale_colour_manual(values = pred_house_cmon2$colour,
+                      limits = pred_house_cmon2$BD_diff_class)+
+    theme(legend.position = "none")
+
+plot.pred.cmon
+```
+
+
+```{r fig.asp = 0.5, fig.width = 15}
+fig4afull <- fig4afull.0 + annotation_custom(ggplotGrob(plot.pred.cmon),
+                          xmin = 3803440, xmax = 4029586,
+                          ymin = 3100597, ymax = 3558510 
+                          )
+
+fig4afull
+```
+
+
+
+## NUTS2 map
+```{r}
+df.nuts <- read_csv(here("Derived/Data/20240830_SurveyData_geodata_LSH.csv"))%>%
+  select(ID, NUTS2)%>%
+  mutate(
+    NUTS1 = substr(NUTS2, 1, 3)
+  )
+
+#df.nuts
+
+#df.nuts %>% filter(NUTS2 == "DK01")
+```
+
+```{r}
+#make df with nuts1 
+df.pred_nuts2 <-df.pred%>%
+  filter(AOA == 1)%>%
+  select(ID, Survey, LU, BD, pred, BD_diff, BD_diff_class)%>%
+  left_join(df.nuts,
+            by = c("ID"))%>%
+  distinct()
+
+# make geo df
+df.predmap <- merge(EUoutline2%>%
+          rename(
+            NUTS2 = nutsID
+          )%>%
+            select(-c(NAME_LATN, Survey)), 
+          df.pred_nuts2
+        , by=c("NUTS2"), all = TRUE)%>%
+  group_by(NUTS2)%>%
+  summarise(
+    n = length(pred),
+    BD_diff_med = median(BD_diff, na.rm=T), 
+    BD_diff_med_min5 = ifelse(n < 5, NA, BD_diff_med),
+    BD_diff_mean = mean(BD_diff, na.rm=T), 
+    BD_diff_mean_min5 = ifelse(n < 5, NA, BD_diff_mean)
+  )#%>%
+  #drop_na(BD_diff_med)
+
+df.predmap
+
+df.predmap %>% arrange(BD_diff_med_min5)
+
+```
+
+```{r fig.asp = 0.9, fig.width = 12}
+fig4.b <- basemap + 
+  theme_minimal(base_size=10)+
+  
+  # # PLOTTING DATA
+  geom_sf(data=df.predmap,
+       aes(fill=BD_diff_med_min5), 
+       col="black")+ 
+  
+  # Plot limits, labels etc ## must be last
+  coord_sf(
+    crs = 3035, 
+    xlim = c(3017294, 4653440),
+    ylim = c(2053597, 3828510)
+    )+
+  scale_fill_gradient2(low = "#99cfd1", mid = "white", high = "#cb627b", 
+                       midpoint = 0, na.value = "grey50", 
+                       name = expression("Median "  * 
+    Delta * "bulk density" ~ "(g cm" ^ {-3} * ")")
+    )+
+    theme(legend.position="bottom",
+        legend.box="horizontal", 
+        legend.key.width = unit(1, "cm"))+
+  guides(fill = guide_colourbar(title.position="top", title.hjust = 0.5),
+         size = guide_legend(title.position="top", title.hjust = 0.5))+
+    theme(#axis.text.x = element_text(angle = 45, hjust=1), 
+          axis.title.x=element_blank(), 
+          axis.title.y=element_blank(), 
+    plot.margin = margin(0,0,0,0))+
+  ggtitle("B")+ 
+    theme(plot.title = element_text(size = 20, face = "bold"))+
+  theme(legend.text=element_text(size=12),
+        legend.title=element_text(size=17))
+
+fig4.b
+```
+
+
+
+```{r fig.asp = 0.6, fig.width = 12}
+fig4 <- ggarrange(fig4afull, fig4.b, 
+                  ncol=2, nrow=1, #common.legend = TRUE, legend="bottom", 
+         #labels = c("A", "B"),
+         widths = c(1.23, 1),
+         font.label = list(size = 25 , color = "black")#, label.x = -0, label.y = 0.1
+         )
+
+fig4
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_F4_Predmap_points_adjusted.png", plot=fig4afull, width=12, height=12, dpi=400)
+```
+
+```{r}
+# ggsave("Derived/Figures/20250307_F4_Predmap_nuts1.png", plot=fig4.b, width=12, height=12, dpi=400)
+```
+
+```{r}
+# ggsave("Derived/Figures/20250307_F4.png", plot=fig4, width=12, height=7.2, dpi=400)
+```
+
+
+# Table of mean and SD of predicted changes
+```{r}
+df.pred %>%
+  filter(AOA == 1)%>%
+  filter(Survey != "I-SIS")%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  )%>%
+  group_by(Country)%>%
+  summarise(
+    n = length(ID),
+    MeanChange = round(mean(BD_diff), 2),
+    sdChange = round(sd(BD_diff), 3)
+  )
+```
+
+```{r}
+df.pred %>%
+  filter(AOA == 1)%>%
+  filter(Survey != "I-SIS")%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  )%>%
+  #group_by(Country)%>%
+  summarise(
+    n = length(ID),
+    MeanChange = round(mean(BD_diff), 2),
+    sdChange = round(sd(BD_diff), 3)
+  )
+```
+
+### how many negative regions?
+```{r}
+df.predmap %>%
+  filter(BD_diff_med_min5 < 0 #-0.010
+         )
+```
+
+### Decrease prevalance
+```{r}
+df.pred %>%
+  filter(LU == "annual crops")%>%
+  mutate(
+    X = case_when(
+      BD_diff > 0 ~ "Increase", 
+      BD_diff < 0 ~ "Decrease", 
+      BD_diff == 0 ~ "Stable", 
+    )
+  )%>%
+  group_by(Survey)%>%
+  mutate(
+    N = length(ID)
+  )%>%
+  group_by(Survey, X)%>%
+  summarise(
+    n = length(ID), 
+    Percent = round(100*n/N, 0)
+  )%>%
+  unique()%>%
+  arrange(X)
+``` 
+
+
+
+
+
+# Supplementary Figure S2: density plot or histogram of predicted changes in BD 
+```{r}
+fig.s2a <- ggplot(df.pred%>%
+            filter(AOA == 1), 
+       aes(x=BD_diff, fill = BD_diff_class))+
+  theme_bw(base_size = 18)+
+  geom_histogram(binwidth = 0.02, boundary = 0)+
+  scale_fill_manual(expression(Delta * "Bulk density" ~ "(g cm" ^ {-3} * ")"), #nolint
+                     values = rev(BDcomp_hex))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  xlab(expression(Delta * "Bulk density" ~ "(g cm" ^ {-3} * ")"))+
+  ylab("Number of sites (-)")+
+    theme(legend.position = "none")
+
+fig.s2a
+```
+
+
+```{r}
+fig.s2b <- ggplot(df.pred%>%
+            filter(AOA == 1, Survey != "I-SIS")%>%
+              # FIX BZE title
+              mutate(
+                Survey = ifelse(Survey == "BZE", "BZE-LW", Survey)
+              )%>% 
+              # use country names
+              mutate(
+                Country = case_when(
+      Survey == "BZE-LW" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+              ), 
+       aes(x=BD_diff, fill = BD_diff_class))+
+  theme_bw(base_size = 18)+
+  geom_histogram(binwidth = 0.02, boundary = 0)+
+  scale_fill_manual(expression(Delta * "Bulk density" ~ "(g cm" ^ {-3} * ")"), #nolint
+                     values = rev(BDcomp_hex))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  xlab(expression(Delta * "Bulk density" ~ "(g cm" ^ {-3} * ")"))+
+  #ylab("Number of sites (-)")+
+  ylab("")+
+    theme(legend.position = "right")+
+    facet_wrap(. ~ Country, nrow=2, scales="free_y")
+
+fig.s2b
+```
+
+```{r fig.asp = 0.4, fig.width = 15}
+figS2 <- ggarrange(fig.s2a, fig.s2b, 
+                  ncol=2, nrow=1, #common.legend = TRUE, legend="bottom", 
+         labels = c("A", "B"),
+         widths = c(1, 2),
+         font.label = list(size = 25 , color = "black"), label.x = -0
+         )
+
+figS2
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_SF2_histogram.png", plot=figS2, width=15, height=6, dpi=400)
+```
+
+
+
+# Mean predicted compaction
+```{r}
+df.pred %>%
+  filter(AOA == 1 & LU == "annual crops")%>%
+  group_by(Survey)%>%
+  summarise(
+    N = length(ID), 
+    meanComp = round(mean(BD_diff), 2), 
+    sdComp = round(sd(BD_diff), 3)
+  )
+```
+
+
+
+## How many sites are predicted to be looser by surveys?
+```{r}
+df.pred %>% 
+  filter(LU == "annual crops" & AOA == 1)%>%
+  mutate(
+    dir = ifelse(BD_diff > 0, "Compaction", "Loosening")
+  )%>%
+  group_by(Survey, dir)%>%
+  summarise(
+    n = length(ID)
+  )%>%
+  ungroup()%>%group_by(Survey)%>%
+  mutate(
+    N = sum(n), 
+    Perc = round(n*100/N, 0)
+  )%>%
+  arrange(dir, Survey)
+```
+
+# Posthoc model Fig. 5
+```{r}
+df.posthoc_varImp <- read_csv(here("Derived/Data/20250307_posthocModel_LSH.csv"))%>%
+  # fix names
+  mutate(
+    Name = case_when(
+      name == "OC" ~ "Organic C", 
+      name == "ClaySilt" ~ "Clay + Silt",
+      #name == "TN" ~ "Total N",
+      #name == "CN" ~ "C/N ratio",
+      #name == "elevation" ~ "Elevation",
+      #name == "FieldCrops" ~ "Field crop prevalence",
+      #name == "Farm_50_more_HA" ~ "Large farm (> 50 ha)",
+      name == "MeanFarmSize" ~ "Mean farm size",
+      name == "PS_prop" ~ "Sugarbeets & Potatoes",
+      name == "MeanConventionalTillage_prop" ~ "Conventional tillage",
+      T ~ name
+    )
+  )%>%
+  arrange(desc(value))
+
+#df.posthoc_varImp
+```
+
+```{r fig.asp = 0.6, fig.width = 8}
+ImpData <- df.posthoc_varImp
+
+fig5 <- ggplot(ImpData, 
+       aes(y=reorder(Name, value), x=value))+
+  geom_bar(stat = "identity", fill="#cb627b")+
+  theme_light(base_size=20) +
+  #coord_flip() +
+  theme(
+    legend.position="none",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+  )+
+  labs(
+    x = "Variable Importance", 
+    #y = ""
+  )+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(angle=0,# vjust=-3,
+                                 hjust=1
+                                 )
+  )
+
+fig5
+```
+
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_F5_VarImp_posthoc.png", plot=fig5, width=8, height=4.8, dpi=400)
+```
+
+
+
+
+# Fig. 6 Soil texture triangle vs predicted increase
+https://bjnnowak.netlify.app/2021/07/26/r-plotting-soil-textures-example-of-water-storage-capacity/
+```{r fig.asp = 1, fig.width = 10}
+df.twosidedpdp <- read_csv(here("Derived/Data/20250307_posthoc_2sidedpdp_texture_LSH.csv"))%>%
+  mutate(
+    Sand = 100 - Clay - Silt
+  )
+
+# get USDA data for fig
+library(ggtern)
+data(USDA)
+USDA_text = USDA |>  
+  group_by(Label) |>
+  summarise_if(is.numeric, 
+               mean, 
+               na.rm = T) |>
+  ungroup() |> 
+  mutate(Label=fct_recode(Label,
+                           "Loamy\nSand"="Loamy Sand",
+                           "Sandy\nClay"="Sandy Clay"))
+
+# make light and dark labels
+USDA_text_light <- USDA_text %>% 
+  filter(Label == "Sandy Clay Loam" | Label == "Clay Loam" | Label == "Loam" | Label == "Sandy Loam")
+
+USDA_text_dark <- USDA_text %>% 
+  filter(Label != "Sandy Clay Loam" & Label != "Clay Loam" & Label != "Loam" & Label != "Sandy Loam")
+
+
+fig.6a <- ggplot(df.twosidedpdp, 
+       aes(x=Sand, y=Clay, z=Silt))+
+  coord_tern(
+     L='x',                   # Left pole
+    T='y',                   # Top pole
+    R='z'                    # Right pole
+  )+
+  theme_bw(base_size=18)+
+  #geom_point()+
+  geom_hex_tern(binwidth=0.05,
+                aes(value=yhat),
+                fun=median,
+                alpha=.9)+
+  geom_polygon(data=USDA,
+               aes(x=Sand,
+                   y=Clay,
+                   group=Label),
+               fill=NA,
+               size = 0.5,
+               alpha=0.5,
+               color = "grey30")+
+  geom_text(data=USDA_text_dark,
+            aes(x=Sand,
+                y=Clay,
+                label=Label),
+            size = 6,
+            color = "grey30")+
+  geom_text(data=USDA_text_light,
+            aes(x=Sand,
+                y=Clay,
+                label=Label),
+            size = 6,
+            color = "grey97",
+            )+
+  scale_fill_gradient2(low = "#ffe2e3", mid = "#E7B9C2", high = "#9c3e5d", 
+                       midpoint = 0, na.value = "grey50", 
+                       name = expression("Est. "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+    )+
+  labs(#fill="Bulk density change\ng cm-3",
+       yarrow = "Clay (%)",
+       zarrow = "Silt (%)",
+       xarrow = "Sand (%)")+
+  theme_showarrows()+
+  theme_hidetitles()+
+  theme_clockwise()+
+  #theme(legend.position = c(0.83, 0.9))+
+  theme(legend.position = c(0.27, 0.9))+
+  theme(legend.text=element_text(size=15),
+        #legend.title=element_text(size=17)
+        )+
+  ggtitle("A")+
+  theme(plot.title = element_text(hjust = 0.12))
+
+fig.6a
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_F6_TrianglePlot.png", plot=fig.6a, width=10, height=10, dpi=400)
+```
+
+## Univariate pdps
+```{r}
+df.ph_clay <- read_csv(here("Derived/Data/20250307_posthoc_pdp_clay_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$Clay, 0.95)
+Bound.high <- quantile(df.baselineinput$Clay, 0.05)
+
+
+fig6b <- ggplot(df.ph_clay,
+       aes(x=Clay, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=0, y=0, xend = 100, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Clay (%)", 
+    y = expression("Estimated  "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = Clay, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          axis.title.y = element_text(size=14))+
+  scale_y_continuous(limits = c(-0.03, 0.07))+
+  annotate("rect", xmin = Bound.low, xmax = 100, ymin = -0.03, ymax = 0.07, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = -0.03, ymax = 0.07, alpha = .2, fill = "grey")
+
+fig6b <- ggMarginal(fig6b, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6b
+```
+
+```{r}
+df.ph_silt <- read_csv(here("Derived/Data/20250307_posthoc_pdp_silt_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$Silt, 0.95)
+Bound.high <- quantile(df.baselineinput$Silt, 0.05)
+
+
+fig6c <- ggplot(df.ph_silt,
+       aes(x=Silt, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=0, y=0, xend = 85, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Silt (%)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = Silt, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank())+
+  scale_y_continuous(limits = c(-0.03, 0.07))+
+  annotate("rect", xmin = Bound.low, xmax = 85, ymin = -0.03, ymax = 0.07, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = -0.03, ymax = 0.07, alpha = .2, fill = "grey")
+
+fig6c <- ggMarginal(fig6c, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6c
+```
+
+```{r}
+df.ph_oc <- read_csv(here("Derived/Data/20250307_posthoc_pdp_oc_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$OC, 0.95)
+Bound.high <- quantile(df.baselineinput$OC, 0.05)
+
+
+fig6d <- ggplot(df.ph_oc,
+       aes(x=OC, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=0, y=0, xend = 4, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "OC (%)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = OC, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank())+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(0, 4))+
+  annotate("rect", xmin = Bound.low, xmax =4, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  geom_vline(xintercept=quantile(df.baselineinput$OC, 0.5), col="grey60", linetype="dashed")
+
+fig6d <- ggMarginal(fig6d, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6d
+```
+
+```{r}
+df.ph_map <- read_csv(here("Derived/Data/20250307_posthoc_pdp_map_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$MAP, 0.95)
+Bound.high <- quantile(df.baselineinput$MAP, 0.05)
+
+
+fig6e <- ggplot(df.ph_map,
+       aes(x=MAP, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=500, y=0, xend = 1850, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "MAP (mm)", 
+    y = expression("Estimated  "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = MAP, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          axis.title.y = element_text(size=14), 
+          #axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(500, 1850))+
+  annotate("rect", xmin = Bound.low, xmax = 1850, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 500, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6e <- ggMarginal(fig6e, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6e
+```
+
+```{r}
+df.eurostat <- read_csv(here("Input/EUROSTAT.csv"))%>%
+  # rename col
+  rename(
+    NUTS2 = NewNUTS2
+  )
+
+df.e <- df.baselineinput%>%
+  left_join(df.nuts,
+            by = c("ID")) %>%
+  left_join(df.eurostat, by="NUTS2")
+```
+
+```{r}
+df.ph_mfs <- read_csv(here("Derived/Data/20250307_posthoc_pdp_mfs_LSH.csv"))
+
+Bound.low <- quantile(df.e$MeanFarmSize, 0.95)
+Bound.high <- quantile(df.e$MeanFarmSize, 0.05)
+
+
+fig6f <- ggplot(df.ph_mfs,
+       aes(x=MeanFarmSize, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=0, y=0, xend = 300, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Mean farm size (ha)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.e, aes(x = MeanFarmSize, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  #scale_x_continuous(limits = c(500, 1850))+
+  annotate("rect", xmin = Bound.low, xmax = 300, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6f <- ggMarginal(fig6f, type="histogram", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6f
+```
+
+```{r}
+df.ph_mat <- read_csv(here("Derived/Data/20250307_posthoc_pdp_mat_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$MAT, 0.95)
+Bound.high <- quantile(df.baselineinput$MAT, 0.05)
+
+
+fig6g <- ggplot(df.ph_mat,
+       aes(x=MAT, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=6, y=0, xend = 16, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "MAT (C)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = MAT, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(6, 16))+
+  annotate("rect", xmin = Bound.low, xmax = 16, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 6, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6g <- ggMarginal(fig6g, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6g
+```
+
+```{r}
+df.ph_ph <- read_csv(here("Derived/Data/20250307_posthoc_pdp_ph_LSH.csv"))
+
+Bound.low <- quantile(df.baselineinput$pH, 0.95)
+Bound.high <- quantile(df.baselineinput$pH, 0.05)
+
+
+fig6h <- ggplot(df.ph_ph,
+       aes(x=pH, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=3.5, y=0, xend = 9, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "pH (-)", 
+    y = expression("Estimated  "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.baselineinput, aes(x = pH, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          axis.title.y = element_text(size=14), 
+          #axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(3.5, 9))+
+  annotate("rect", xmin = Bound.low, xmax = 9, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 3.5, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6h <- ggMarginal(fig6h, type="density", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6h
+```
+
+
+```{r}
+df.ph_till <- read_csv(here("Derived/Data/20250307_posthoc_pdp_till_LSH.csv"))
+
+Bound.low <- quantile(df.e$MeanConventionalTillage_prop, 0.95)
+Bound.high <- quantile(df.e$MeanConventionalTillage_prop, 0.05)
+
+
+fig6i <- ggplot(df.ph_till,
+       aes(x=MeanConventionalTillage_prop, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=20, y=0, xend = 90, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Conventional tillage (%)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.e, aes(x = MeanConventionalTillage_prop, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(20, 90))+
+  annotate("rect", xmin = Bound.low, xmax = 90, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 20, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6i <- ggMarginal(fig6i, type="histogram", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6i
+```
+
+```{r}
+df.ph_ps <- read_csv(here("Derived/Data/20250307_posthoc_pdp_ps_LSH.csv"))
+
+Bound.low <- quantile(df.e$PS_prop, 0.95)
+Bound.high <- quantile(df.e$PS_prop, 0.05)
+
+
+fig6j <- ggplot(df.ph_ps,
+       aes(x=PS_prop, y=yhat, col="A"))+ # add color to control color of marginal density plot
+  geom_segment(aes(x=0, y=0, xend = 22, yend = 0), col= "grey70", lty = "dashed", size=0.9)+
+  geom_line(size=1.2, col="#cb627b" # col="#67a9b6"
+            )+
+  theme_classic(base_size = 15)+
+  labs(
+    x = "Potatoes and sugar beets (%)", 
+    y = expression("Predicted "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )+
+  # add "invisible" data as points to generate marginal density plot
+  geom_point(data=df.e, aes(x = PS_prop, y = 0), shape=NA
+             )+
+  scale_color_manual(values=c("grey80"))+
+    theme(legend.position = "none", 
+          axis.title.x = element_text(size=12), 
+          #axis.title.y = element_text(size=10), 
+          axis.title.y = element_blank()
+          )+
+  scale_y_continuous(limits = c(-0.03, 0.08))+
+  scale_x_continuous(limits = c(0, 22))+
+  annotate("rect", xmin = Bound.low, xmax = 22, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")+
+  annotate("rect", xmin = 0, xmax =Bound.high, ymin = -0.03, ymax = 0.08, alpha = .2, fill = "grey")
+
+fig6j <- ggMarginal(fig6j, type="histogram", margins = "x", col="grey70", groupFill=TRUE, , groupColour = TRUE)
+
+fig6j
+```
+
+```{r fig.asp = 0.9, fig.width = 10}
+labels <-  LETTERS[2:10]
+
+fig6right <- ggarrange(NA, NA, NA,
+                        fig6b, fig6c, fig6d, fig6e, fig6f, fig6g, fig6h, fig6i, fig6j,
+                  ncol=3, nrow=4, #common.legend = TRUE, legend="bottom", 
+         labels = c(NA, NA, NA, labels),
+         widths = c(1.2, 1, 1), heights = c(0.05, 1, 1, 1),
+         font.label = list(size = 22 , color = "black"), label.x = -0.02, label.y = 1.05
+         )
+
+fig6right
+```
+
+```{r fig.asp = 0.4, fig.width = 20}
+fig6 <- ggarrange(fig.6a, fig6right,
+                  ncol=2, nrow=1, #common.legend = TRUE, legend="bottom", 
+         #labels = c("A"),
+         widths = c(1.15, 1),
+         font.label = list(size = 25 , color = "black"), label.x = -0
+         )
+
+fig6 # in this version, the edge labels for the triangle are lost, so I use the individual plots for the manuscript
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250310_F6_univariate.png", plot=fig6right, width=10, height=9, dpi=400)
+```
+
+## Export figure
+```{r}
+# ggsave("Derived/Figures/20250307_F6.png", plot=fig6, width=20, height=8, dpi=400)
+```
+
+
+
+# Make supp fig s3 - corr plot for posthoc model
+```{r}
+# get data
+df.posthocinput <- read_csv(here("Derived/Data/20250307_posthocModelData_LSH.csv"))%>%
+  # select vars
+  select(Clay, Silt, OC, MAP, MeanFarmSize, MAT, pH, MeanConventionalTillage_prop, PS_prop)%>%
+  # fix names
+  rename(
+      "Organic C" = "OC", 
+      "Mean farm size" = "MeanFarmSize",
+      "Sugarbeets & Potatoes" = "PS_prop",
+      "Conventional tillage" = "MeanConventionalTillage_prop",
+  )
+
+df.posthocinput
+```
+
+
+```{r  fig.asp = 1, fig.width = 10}
+df.corr <- corr.test(df.posthocinput, adjust = "none", method="spearman") # from psych package
+corr <- df.corr$r
+p.mat<- df.corr$p
+
+
+corrplot(corr, # update numbers
+addgrid.col = "white",
+method = "color", # instead of "circle"
+col = rev(div_gradient), #my.col,
+bg = "white",
+tl.col = "black",
+tl.pos = "td",
+type = "upper",
+tl.srt = 45,
+tl.cex = 1.5,
+#font = 1, # controls font type (eg times new roman)
+#text.cex=4,
+cl.cex = 2., # legend size
+#title= "influences on biomass production",
+diag = FALSE,
+addCoef.col = "grey30", # pastes spearman vals
+   number.cex=1.25, # number size
+#p.mat= p.mat#, # update numbers
+#insig = "blank")
+#insig = "label_sig",
+#sig.level = c(.001, .01, .05), pch.cex = 1.3, pch.col = "grey20"
+)
+```
+
+
+# Redo proportion of sites compacted naturally and anthropogenically
+Need to know the mean compaction by survey and the observed site BD and packing density
+
+## Threshold = 1.71
+```{r}
+# calculate mean change in BD by country / region
+df.meaninc <- df.pred %>%
+  filter(AOA == 1)%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  ) %>%
+  group_by(Country)%>%
+  summarise(
+    meanInc = mean(BD_diff)
+  )
+
+
+#df.meaninc
+```
+
+```{r}
+df.pass1.71 <- df.pred %>%
+  filter(AOA == 1)%>%
+  select(ID, Survey, LU, Clay, Silt, BD, pred)%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  )%>%
+  left_join(df.meaninc, by="Country")%>%
+  mutate(
+    PD_obs = BD + 0.005*Clay + 0.001*Silt, 
+    PD_natural = PD_obs - meanInc, # subtract mean increase in BD from the observed packing density
+    Obs_comp = ifelse(PD_obs >= 1.71, "Compacted", "Not Compacted"),
+    Nat_comp = ifelse(PD_natural >= 1.71, "Compacted", "Not Compacted")
+  )
+
+#df.pass1.71
+```
+
+```{r}
+df.natcomp <- df.pass1.71 %>%
+  filter(Country != "Ireland") %>%
+  group_by(Country, Nat_comp)%>%
+  summarise(
+    n_nat = length(ID)
+  )%>%
+  ungroup() %>%
+  group_by(Country)%>%
+  mutate(
+    N = sum(n_nat), 
+    perc_nat = round(100*n_nat/N, 0)
+  )%>%
+  filter(Nat_comp == "Compacted")
+
+df.natcomp
+```
+
+```{r}
+df.obscomp <- df.pass1.71 %>%
+  filter(Country != "Ireland") %>%
+  group_by(Country, Obs_comp)%>%
+  summarise(
+    n_obs = length(ID)
+  )%>%
+  ungroup() %>%
+  group_by(Country)%>%
+  mutate(
+    N = sum(n_obs),
+    perc_obs = round(100*n_obs/N, 0)
+  )%>%
+  filter(Obs_comp == "Compacted")
+
+df.obscomp
+```
+
+```{r}
+df.table4 <- df.natcomp %>%
+  select(-c(Nat_comp, N))%>%
+  left_join(df.obscomp%>%
+  select(-c(Obs_comp)),
+            by=c("Country"))%>%
+  select(Country, N, n_nat, n_obs, perc_nat, perc_obs)%>%
+  mutate(
+    n_anthro = n_obs - n_nat,
+    perc_anthro = round(100*n_anthro/N, 0),
+    prop_anthro = round(100*n_anthro/n_obs, 0)
+  )%>%
+  select(Country, N, n_nat, perc_nat, n_obs, perc_obs, n_anthro, perc_anthro, prop_anthro)
+
+df.table4
+```
+
+```{r}
+df.table4 %>%
+  ungroup()%>%
+  summarise(
+    N = sum(N), 
+    n_nat = sum(n_nat), 
+    n_obs = sum(n_obs), 
+    n_anthro = sum(n_anthro)
+  )%>%
+  mutate(
+    Country = "All",
+    perc_nat = round(100*n_nat/N, 0),
+    perc_obs = round(100*n_obs/N, 0),
+    perc_anthro = round(100*n_anthro/N, 0), 
+    prop_anthro = round(100*n_anthro/n_obs, 0)
+  )%>%
+  select(Country, N, n_nat, perc_nat, n_obs, perc_obs, n_anthro, perc_anthro, prop_anthro)
+```
+
+## Figure 7 - Proportion plot
+```{r}
+df.f6 <- df.table4 %>%
+  select(Country, N, n_nat, n_obs, n_anthro)%>%
+  mutate(
+    n_uncomp = N - n_obs, 
+    Uncomp_p = 100*n_uncomp/N, 
+    Anthro_p = 100*n_anthro/N, 
+    Nat_p = 100*n_nat/N
+  )%>%
+  gather(Var,Val, Uncomp_p:Nat_p)%>%
+  select(Country, Var, Val)%>%
+  mutate(
+    TH = case_when(
+      Var == "Uncomp_p" ~ "Not compacted",
+      Var == "Anthro_p" ~ "Anthropologically compacted",
+      Var == "Nat_p" ~ "Naturally compacted"
+    )
+  )%>%
+  arrange(Country, Var)%>%
+  group_by(Country)%>%
+  mutate(
+    CS = cumsum(Val),
+    pos = case_when( # black text
+      TH == "Anthropologically compacted" ~ NA, 
+      TH == "Naturally compacted" ~ CS - 3, 
+      TH == "Not compacted" ~ CS - 3, 
+    ), 
+    pos2 = case_when( # white text
+      TH == "Anthropologically compacted" ~ CS - 3, 
+      TH == "Naturally compacted" ~ NA, 
+      TH == "Not compacted" ~ NA, 
+    ),
+    # fix DK position for Anthro
+    pos2 = ifelse(Country == "Denmark" & TH == "Anthropologically compacted", 1.5, pos2)
+  )%>%
+  merge(df.table4 %>% select(Country, N), 
+        by=c("Country"))%>%
+  mutate(
+    n = N*(Val/100), 
+    Country = factor(Country, levels = c("Germany", "France", "Flanders", "Denmark")), 
+    TH = factor(TH, levels = c("Not compacted", "Naturally compacted", "Anthropologically compacted"))
+  )
+
+df.f6
+```
+
+
+## Split up maps 
+```{r}
+df.compmap <- df.pass1.71 %>%
+  mutate(
+    Nat_comp = case_when(
+      Nat_comp == "Not Compacted" ~ "Not naturally compacted", 
+      Nat_comp == "Compacted" ~ "Naturally compacted"
+    ), 
+    Compacted = case_when(
+      Obs_comp == "Not Compacted" ~ "Not compacted", 
+      Obs_comp == "Compacted" & Nat_comp == "Naturally compacted" ~ "Naturally compacted", 
+      Obs_comp == "Compacted" & Nat_comp == "Not naturally compacted" ~ "Anthropogenically compacted", 
+      T ~ "MISTAKE"
+    )
+  )
+
+table(df.compmap$Obs_comp, df.compmap$Nat_comp)
+
+table(df.compmap$Compacted, df.compmap$Obs_comp)
+```
+
+```{r}
+df.comppoints <- df.compmap %>% 
+  merge(df.coords,
+        by=c("ID"))%>%
+  drop_na(lon)%>%
+    sf::st_as_sf(coords = c("lon", 
+                    "lat"),
+        crs = 4326)
+```
+
+```{r fig.asp = 0.9, fig.width = 6}
+f7germany <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=10)+
+  scale_fill_manual(values=c("grey90",  "white"#"grey95"
+                             ))+ # colors the countries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  ## Plot countries individually to control point sizes
+  # # Germany
+  geom_sf(data=df.comppoints%>%
+            filter(Survey == "BZE"),
+       aes(col=Compacted, shape = Compacted), size=1.6, stroke = 1)+
+  
+  scale_color_manual(values=c("#9c3e5d", "#cb627b", "#67a9b6")#, breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  scale_shape_manual(values=c(19, 17, 1))+
+    theme(legend.position = "bottom")+
+  coord_sf(
+    crs = 3035,
+    xlim = c(4057294, 4653440),
+    ylim = c(2723597, 3498510)
+    )+
+  guides(colour = guide_legend(override.aes = list(size=5)))+
+  #ggtitle("B")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  guides(color = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+                              ))+
+  theme(legend.text=element_text(size=15),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )#+
+  #labs(shape = "Compaction status", color = "Compaction status")
+
+f7germany
+```
+
+```{r fig.asp = 0.9, fig.width = 6}
+f7france <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=10)+
+  scale_fill_manual(values=c("grey90",  "white"#"grey95"
+                             ))+ # colors the countries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  ## Plot countries individually to control point sizes
+  # France
+  geom_sf(data=df.comppoints%>%
+            filter(Survey == "RMQS"),
+       aes(col=Compacted, shape = Compacted), size=2.5, stroke = 1.2)+
+  
+  scale_color_manual(values=c(#"#9c3e5d", 
+    "#cb627b", "#67a9b6")#, breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  scale_shape_manual(values=c(#19,
+    17, 1))+
+    theme(legend.position = "bottom")+
+  coord_sf(
+    crs = 3035,
+    xlim = c(3280294, 4153440),
+    ylim = c(2203597, 3118510)
+    )+
+  guides(colour = guide_legend(override.aes = list(size=5)))+
+  #ggtitle("B")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  guides(color = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+                              ))+
+  theme(legend.text=element_text(size=25),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )#+
+  #labs(shape = "Compaction status", color = "Compaction status")
+
+f7france
+```
+```{r}
+percbreaks <- c("0%", "25%", "50%", "75%", "100%")
+
+f7a <- ggplot(df.f6, 
+       aes(y=Country, x=Val, fill=TH))+
+  theme_minimal(base_size = 25)+
+  geom_bar(stat="identity")+
+  #                   )+
+  scale_fill_manual(values=c("#9c3e5d", "#cb627b", "#67a9b6"), breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  theme(legend.position = "bottom")+
+  # guides(fill=guide_legend(title="Land Use"))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  #theme(axis.title.x=element_blank())+
+  theme(legend.title=element_blank())+
+  theme(axis.title.y = element_blank())+
+  scale_x_continuous(labels=percbreaks, breaks=c(0, 25,50, 75, 100)
+                     )+
+  theme(axis.text.y=element_text(angle=0, vjust=0,
+                                 hjust=1
+                                 ))+
+  geom_text(aes(x = pos, y = Country, label = n), size=5)+
+  geom_text(aes(x = pos2, y = Country, label = n), size=5, col="white")+
+  labs(x=expression("Proportion of annual cropland sites where PD"["obs"] * " > 1.71" ~ "(g cm" ^ {-3} * ")"))+
+  #ggtitle("A")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  theme(
+  axis.title.x = element_text(size = 20),
+  legend.text=element_text(size=18),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )
+  #))
+
+f7a
+```
+
+```{r fig.asp = 0.9, fig.width = 18}
+f7alternative2 <- ggarrange(f7germany, f7france,# f7a,
+                  ncol=2, nrow=1, common.legend = TRUE, legend="bottom", 
+          labels = c("A", "B"),
+          widths = c(1, 1),
+          #heights = c(0.4, 1, 0.2),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative2.2 <- ggarrange(NA, f7a, NA, 
+                  ncol=3, nrow=1, common.legend = FALSE, legend="none", 
+          labels = c("", "C", ""),
+           widths = c(0.15, 1, 0.15),
+          #heights = c(1, 0.6),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative3 <- ggarrange(f7alternative2, f7alternative2.2,
+                  ncol=1, nrow=2, common.legend = FALSE, legend="none", 
+          #labels = c("", "C"),
+          # widths = c(1, 0.65),
+          heights = c(1, 0.6),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative3
+```
+
+
+
+```{r}
+# ggsave("Derived/Figures/20250312_Fig7_withmap_v2.png", plot=f7alternative3, width=18, height=14, dpi=400)
+```
+
+
+
+
+
+
+
+
+
+
+## Threshold = 1.75, old calculation method for sup table S4
+```{r}
+# calculate mean change in BD by country / region
+df.meaninc <- df.pred %>%
+  filter(AOA == 1)%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  ) %>%
+  group_by(Country)%>%
+  summarise(
+    meanInc = mean(BD_diff)
+  )
+
+
+#df.meaninc
+```
+
+```{r}
+df.pass1.75 <- df.pred %>%
+  filter(AOA == 1)%>%
+  select(ID, Survey, LU, Clay, Silt, BD, pred)%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  )%>%
+  left_join(df.meaninc, by="Country")%>%
+  mutate(
+    PDa_obs = BD + 0.009*Clay, 
+    PDa_natural = PDa_obs - meanInc, # subtract mean increase in BD from the observed packing density
+    Obs_comp = ifelse(PDa_obs >= 1.71, "Compacted", "Not Compacted"),
+    Nat_comp = ifelse(PDa_natural >= 1.71, "Compacted", "Not Compacted")
+  )
+
+#df.pass1.75
+```
+
+```{r}
+# how many sites are naturally compacted?
+df.natcomp_a <- df.pass1.75 %>%
+  filter(Country != "Ireland") %>%
+  group_by(Country, Nat_comp)%>%
+  summarise(
+    n_nat = length(ID)
+  )%>%
+  ungroup() %>%
+  group_by(Country)%>%
+  mutate(
+    N = sum(n_nat), 
+    perc_nat = round(100*n_nat/N, 0)
+  )%>%
+  filter(Nat_comp == "Compacted")
+
+df.natcomp_a
+```
+
+```{r}
+df.obscomp_a <- df.pass1.75 %>%
+  filter(Country != "Ireland") %>%
+  group_by(Country, Obs_comp)%>%
+  summarise(
+    n_obs = length(ID)
+  )%>%
+  ungroup() %>%
+  group_by(Country)%>%
+  mutate(
+    N = sum(n_obs), 
+    perc_obs = round(100*n_obs/N, 0)
+  )%>%
+  filter(Obs_comp == "Compacted")
+
+df.obscomp_a
+```
+
+```{r}
+df.table4_a <- df.natcomp_a %>%
+  select(-c(Nat_comp, N))%>%
+  left_join(df.obscomp_a%>% 
+  select(-c(Obs_comp)), 
+            by=c("Country"))%>%
+  select(Country, N, n_nat, n_obs, perc_nat, perc_obs)%>%
+  mutate(
+    n_anthro = n_obs - n_nat, 
+    perc_anthro = round(100*n_anthro/N, 0), 
+    prop_anthro = round(100*n_anthro/n_obs, 0)
+  )%>%
+  select(Country, N, n_nat, perc_nat, n_obs, perc_obs, n_anthro, perc_anthro, prop_anthro)
+
+df.table4_a
+```
+
+
+```{r}
+df.table4_a %>%
+  ungroup()%>%
+  summarise(
+    N = sum(N), 
+    n_nat = sum(n_nat), 
+    n_obs = sum(n_obs), 
+    n_anthro = sum(n_anthro)
+  )%>%
+  mutate(
+    Country = "All",
+    perc_nat = round(100*n_nat/N, 0),
+    perc_obs = round(100*n_obs/N, 0),
+    perc_anthro = round(100*n_anthro/N, 0), 
+    prop_anthro = round(100*n_anthro/n_obs, 0)
+  )%>%
+  select(Country, N, n_nat, perc_nat, n_obs, perc_obs, n_anthro, perc_anthro, prop_anthro)
+```
+
+
+
+# Supp Fig - threshold 1.75 
+```{r}
+df.fS1.75 <- df.table4_a %>%
+  select(Country, N, n_nat, n_obs, n_anthro)%>%
+  mutate(
+    n_uncomp = N - n_obs, 
+    Uncomp_p = 100*n_uncomp/N, 
+    Anthro_p = 100*n_anthro/N, 
+    Nat_p = 100*n_nat/N
+  )%>%
+  gather(Var,Val, Uncomp_p:Nat_p)%>%
+  select(Country, Var, Val)%>%
+  mutate(
+    TH = case_when(
+      Var == "Uncomp_p" ~ "Not compacted",
+      Var == "Anthro_p" ~ "Anthropologically compacted",
+      Var == "Nat_p" ~ "Naturally compacted"
+    )
+  )%>%
+  arrange(Country, Var)%>%
+  group_by(Country)%>%
+  mutate(
+    CS = cumsum(Val),
+    pos = case_when( # black text
+      TH == "Anthropologically compacted" ~ NA, 
+      TH == "Naturally compacted" ~ CS - 3, 
+      TH == "Not compacted" ~ CS - 3, 
+    ), 
+    pos2 = case_when( # white text
+      TH == "Anthropologically compacted" ~ CS - 3, 
+      TH == "Naturally compacted" ~ NA, 
+      TH == "Not compacted" ~ NA, 
+    ),
+    # fix DK position for Anthro
+    pos2 = ifelse(Country == "Denmark" & TH == "Anthropologically compacted", 1.5, pos2)
+  )%>%
+  merge(df.table4 %>% select(Country, N), 
+        by=c("Country"))%>%
+  mutate(
+    n = N*(Val/100), 
+    Country = factor(Country, levels = c("Germany", "France", "Flanders", "Denmark")), 
+    TH = factor(TH, levels = c("Not compacted", "Naturally compacted", "Anthropologically compacted"))
+  )
+
+df.fS1.75
+# df.f6
+```
+
+
+```{r}
+percbreaks <- c("0%", "25%", "50%", "75%", "100%")
+
+fs.175a <- ggplot(df.fS1.75, 
+       aes(y=Country, x=Val, fill=TH))+
+  theme_minimal(base_size = 25)+
+  geom_bar(stat="identity")+
+  #                   )+
+  scale_fill_manual(values=c("#FF3D7FFF", "#FF9E9DFF", "#3FB8AFFF"), breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  theme(legend.position = "bottom")+
+  # guides(fill=guide_legend(title="Land Use"))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  #theme(axis.title.x=element_blank())+
+  theme(legend.title=element_blank())+
+  theme(axis.title.y = element_blank())+
+  scale_x_continuous(labels=percbreaks, breaks=c(0, 25,50, 75, 100)
+                     )+
+  theme(axis.text.y=element_text(angle=0, vjust=0,
+                                 hjust=1
+                                 ))+
+  geom_text(aes(x = pos, y = Country, label = n), size=5)+
+  geom_text(aes(x = pos2, y = Country, label = n), size=5, col="white")+
+  labs(x=expression("Proportion of annual cropland sites where PD"["alt"] * " > 1.75" ~ "(g cm" ^ {-3} * ")"))+
+  #ggtitle("A")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  theme(
+  axis.title.x = element_text(size = 20),
+  legend.text=element_text(size=18),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )
+  #))
+
+fs.175a
+# f7a
+```
+
+## Split up maps 
+```{r}
+df.compmap_s175 <- df.pass1.75 %>%
+  mutate(
+    Nat_comp = case_when(
+      Nat_comp == "Not Compacted" ~ "Not naturally compacted", 
+      Nat_comp == "Compacted" ~ "Naturally compacted"
+    ), 
+    Compacted = case_when(
+      Obs_comp == "Not Compacted" ~ "Not compacted", 
+      Obs_comp == "Compacted" & Nat_comp == "Naturally compacted" ~ "Naturally compacted", 
+      Obs_comp == "Compacted" & Nat_comp == "Not naturally compacted" ~ "Anthropogenically compacted", 
+      T ~ "MISTAKE"
+    )
+  )
+
+table(df.compmap_s175$Obs_comp, df.compmap_s175$Nat_comp)
+
+table(df.compmap_s175$Compacted, df.compmap_s175$Obs_comp)
+```
+```{r}
+df.comppoints_s175 <- df.compmap_s175 %>% 
+  merge(df.coords,
+        by=c("ID"))%>%
+  drop_na(lon)%>%
+    sf::st_as_sf(coords = c("lon", 
+                    "lat"),
+        crs = 4326)
+```
+
+
+```{r fig.asp = 0.9, fig.width = 6}
+fs71g5ermany_a <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=10)+
+  scale_fill_manual(values=c("grey90",  "white"#"grey95"
+                             ))+ # colors the countries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  ## Plot countries individually to control point sizes
+  # # Germany
+  geom_sf(data=df.comppoints_s175%>%
+            filter(Survey == "BZE"),
+       aes(col=Compacted, shape = Compacted), size=1.6, stroke = 1)+
+  
+  scale_color_manual(values=c("#FF3D7FFF", "#FF9E9DFF", "#3FB8AFFF")#, breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  scale_shape_manual(values=c(19, 17, 1))+
+    theme(legend.position = "bottom")+
+  coord_sf(
+    crs = 3035,
+    xlim = c(4057294, 4653440),
+    ylim = c(2723597, 3498510)
+    )+
+  guides(colour = guide_legend(override.aes = list(size=5)))+
+  #ggtitle("B")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  guides(color = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+                              ))+
+  theme(legend.text=element_text(size=15),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )#+
+  #labs(shape = "Compaction status", color = "Compaction status")
+
+fs71g5ermany_a
+# f7germany
+```
+
+```{r fig.asp = 0.9, fig.width = 6}
+fa175france_a <- ggplot() + 
+  # BASEMAP
+  geom_sf(data=CountryOutline,
+    aes(fill = X)
+    )+
+  theme_minimal(base_size=10)+
+  scale_fill_manual(values=c("grey90",  "white"#"grey95"
+                             ))+ # colors the countries based on whether or not they are included in the study
+  guides(fill = FALSE)+ # excludes the fill-component from the figure
+  
+  # PLOTTING DATA
+  ## Plot countries individually to control point sizes
+  # France
+  geom_sf(data=df.comppoints_s175%>%
+            filter(Survey == "RMQS"),
+       aes(col=Compacted, shape = Compacted), size=2.5, stroke = 1.2)+
+  
+  scale_color_manual(values=c(#"#FF3D7FFF", 
+    "#FF9E9DFF", "#3FB8AFFF")#, breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+  scale_shape_manual(values=c(#19, 
+    17, 1))+
+    theme(legend.position = "bottom")+
+  coord_sf(
+    crs = 3035,
+    xlim = c(3280294, 4153440),
+    ylim = c(2203597, 3118510)
+    )+
+  guides(colour = guide_legend(override.aes = list(size=5)))+
+  #ggtitle("B")+
+    theme(plot.title = element_text(size = 25, face = "bold"))+
+  guides(color = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+                              ))+
+  theme(legend.text=element_text(size=25),
+        #legend.title=element_text(size=17), 
+        legend.title=element_blank()
+        )#+
+  #labs(shape = "Compaction status", color = "Compaction status")
+
+fa175france_a
+# f7france
+```
+
+
+```{r fig.asp = 0.9, fig.width = 18}
+f7alternative2_s <- ggarrange(fa175france_a, fs71g5ermany_a,# f7a,
+                  ncol=2, nrow=1, common.legend = TRUE, legend="bottom", 
+          labels = c("A", "B"),
+          widths = c(1, 1),
+          #heights = c(0.4, 1, 0.2),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative2.2_s <- ggarrange(NA, fs.175a, NA, 
+                  ncol=3, nrow=1, common.legend = FALSE, legend="none", 
+          labels = c("", "C", ""),
+           widths = c(0.15, 1, 0.15),
+          #heights = c(1, 0.6),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative3_s <- ggarrange(f7alternative2_s, f7alternative2.2_s,
+                  ncol=1, nrow=2, common.legend = FALSE, legend="none", 
+          #labels = c("", "C"),
+          # widths = c(1, 0.65),
+          heights = c(1, 0.6),
+          font.label = list(size = 28, color = "black")#, 
+          #label.x = 0.05
+         )
+
+f7alternative3_s
+```
+
+```{r}
+# ggsave("Derived/Figures/20250307_SF4_withmap_.png", plot=f7alternative3_s, width=18, height=14, dpi=400)
+```
+
+
+
+# Distribution of pred by compaction class
+```{r fig.asp = 0.4, fig.width = 12}
+df.compmap2 <- df.compmap %>%
+  mutate(
+    delta = BD - pred
+  )
+```
+
+```{r fig.asp = 0.4, fig.width = 12}
+f.s4 <- ggplot(df.compmap2%>%
+         filter(Country != "Ireland"), 
+       aes(x=Compacted, y=delta, fill=Compacted))+
+  # geom_density(alpha=0.5)+
+  geom_violin()+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0, linetype="dashed", col="grey60")+
+  stat_summary(fun.y=mean, geom="point", shape=20, size=4, color="grey30") +
+  scale_fill_manual(values=c("#9c3e5d", "#ffc5c7", "#67a9b6")#, breaks=c('Anthropologically compacted', 'Naturally compacted', 'Not compacted')
+                    )+
+    facet_wrap(. ~ Country, ncol=4#, scales="free"
+               )+
+    theme(legend.position = "bottom")+
+  theme(#axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  # guides(fill = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+  #                             ))#+
+  theme(legend.text=element_text(size=15),
+        #legend.title=element_text(size=17),
+        legend.title=element_blank()
+  )+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  labs(
+    x = "Corrected compaction category", 
+    y = expression(Delta * "BD"[site] ~ "(g cm" ^ {-3} * ")")
+  )+
+  guides(fill = guide_legend(override.aes = list(shape = NA)))
+
+f.s4
+```
+
+```{r}
+# ggsave("Derived/Figures/20250307_SF5.png", plot=f.s4, width=12, height=4.8, dpi=400)
+```
+
+
+
+# Correlation of point density / number and change in BD - Supplementary fig. S6
+```{r}
+df.nuts2_area <- df.predmap %>%
+  mutate(
+    Area_km2 = st_area(geometry)/(1000*1000), 
+    km2_per_n = as.double(Area_km2/n), 
+    Country = substr(NUTS2, 1, 2), 
+    Country = case_when(
+      Country == "DE" ~ "Germany", 
+      Country == "BE" ~ "Flanders", 
+      Country == "DK" ~ "Denmark", 
+      Country == "FR" ~ "France", 
+      Country == "IE" ~ "Ireland"
+    )
+  )
+
+# df.nuts2_area %>% arrange(desc(km2_per_n))
+
+ggplot(df.nuts2_area, 
+       aes(x=n, y=BD_diff_med, col=Country))+
+  geom_point()
+
+f.s6 <- ggplot(df.nuts2_area%>%
+         filter(Country != "Ireland"), 
+       aes(x=km2_per_n, y=BD_diff_med, col=Country, shape=Country))+
+  geom_point(size=3, alpha=0.6)+
+  scale_shape_manual(values=c(16, 17, 18, 15, 4, 15, 1, 2, 3, 8, 5))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0, linetype="dashed", col="grey60")+
+  xlim(0, 3000)+
+  scale_color_manual(values=c("#9c3e5d", "#cb627b", "#67a9b6", "#3b809a"))+
+  scale_color_manual(values=c("#3b809a", "#9c3e5d", "#67a9b6", "#cb627b"))+
+    theme(legend.position = "bottom")+
+  theme(#axis.title.x=element_blank(),
+        # axis.text.x=element_blank(),
+        # axis.ticks.x=element_blank()
+    )+
+  # guides(fill = guide_legend(nrow=1, byrow=TRUE, override.aes = list(size=5), title.position="top"#, title.hjust = 0.5
+  #                             ))#+
+  theme(legend.text=element_text(size=15),
+        #legend.title=element_text(size=17),
+        legend.title=element_blank()
+  )+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  labs(
+    x = expression("km" ^ {2} * " per site by NUTS2 region"), 
+    y = expression("Median "  * Delta * "BD" ~ "(g cm" ^ {-3} * ")")
+  )
+
+f.s6
+```
+
+```{r}
+# ggsave("Derived/Figures/20250612_SF6.png", plot=f.s6, width=12, height=7.2, dpi=400)
+```
+
+
+
+# Check out packing density of grasslands
+```{r}
+df.gp <- df.baselineinput %>%
+  filter(LU == "grassland") %>%
+  select(ID, Survey, LU, Clay, Silt, BD, OC)%>%
+  mutate(
+    PD = BD + 0.005*Clay + 0.001*Silt,
+    Obs_comp = ifelse(PD >= 1.71, "Compacted", "Not Compacted")
+  )
+
+df.gp
+```
+
+```{r}
+df.gp %>%
+  group_by(Survey, Obs_comp)%>%
+  tally()%>%
+  ungroup() %>%
+  group_by(Survey)%>%
+  mutate(
+    N = sum(n), 
+    Perc = 100*n/N
+  )%>%
+  arrange(Obs_comp)
+```
+
+# Ratios between natural and observed packing densities
+```{r}
+df.r <- df.pass1.71 %>%
+  mutate(
+    obs_nat = PD_obs/PD_natural
+  )
+
+df.r
+```
+
+```{r}
+ggplot(df.r, 
+       aes(x=obs_nat))+
+  geom_density()
+```
+```{r}
+df.r2 <- df.pred %>%
+  filter(AOA == 1)%>%
+  select(ID, Survey, LU, Clay, Silt, BD, pred)%>%
+  mutate(
+    Country = case_when(
+      Survey == "BZE" ~ "Germany", 
+      Survey == "CMON" ~ "Flanders", 
+      Survey == "DDJD" ~ "Denmark", 
+      Survey == "I-SIS" ~ "Ireland", 
+      Survey == "RMQS" ~ "France"
+    )
+  )%>%
+  mutate(
+    PD_obs = BD + 0.005*Clay + 0.001*Silt, 
+    PD_est = pred + 0.005*Clay + 0.001*Silt,
+    Obs_comp = ifelse(PD_obs >= 1.71, "Compacted", "Not Compacted"),
+    Est_comp = ifelse(PD_est >= 1.71, "Compacted", "Not Compacted"), 
+    obs_est = PD_obs/PD_est
+  )
+
+df.r2
+```
+
+```{r}
+ggplot(df.r2 %>%
+         filter(Country != "Ireland"), 
+       aes(x=obs_est, fill=Country))+
+  geom_density(alpha=0.4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
